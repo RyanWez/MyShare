@@ -116,24 +116,59 @@ export async function fetchStats(
   return cachedFetch<StatsResponse>(key, qs ? `/api/stats?${qs}` : "/api/stats", 3000, opts);
 }
 
+export interface SimsListResponse {
+  sims: Sim[];
+  total: number;
+  activeTotal: number;
+}
+
 export async function fetchSims(opts?: {
   bypassCache?: boolean;
   noDelay?: boolean;
   rexId?: string;
   status?: string;
-}): Promise<Sim[]> {
+  q?: string;
+  includePhone?: string;
+  limit?: number;
+}): Promise<SimsListResponse> {
   const params = new URLSearchParams();
   if (opts?.rexId && opts.rexId !== "all") params.set("rexId", opts.rexId);
   if (opts?.status) params.set("status", opts.status);
+  if (opts?.q) params.set("q", opts.q);
+  if (opts?.includePhone) params.set("includePhone", opts.includePhone);
+  if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
   const qs = params.toString();
-  const key = `sims:${opts?.rexId || "all"}:${opts?.status || "all"}`;
-  const data = await cachedFetch<{ ok: boolean; sims: Sim[] }>(
+  const key = `sims:${opts?.rexId || "all"}:${opts?.status || "all"}:${opts?.q || ""}:${opts?.includePhone || ""}:${opts?.limit ?? 48}`;
+  const data = await cachedFetch<{ ok: boolean; sims: Sim[]; total?: number; activeTotal?: number }>(
     key,
     qs ? `/api/sims?${qs}` : "/api/sims",
     3000,
     opts
   );
-  return data.sims ?? [];
+  const sims = data.sims ?? [];
+  return {
+    sims,
+    total: data.total ?? sims.length,
+    activeTotal: data.activeTotal ?? sims.filter((s) => s.status === "active").length,
+  };
+}
+
+export async function fetchFleetCounts(opts?: {
+  bypassCache?: boolean;
+  noDelay?: boolean;
+  rexId?: string;
+}): Promise<{ total: number; active: number }> {
+  const params = new URLSearchParams();
+  if (opts?.rexId && opts.rexId !== "all") params.set("rexId", opts.rexId);
+  const qs = params.toString();
+  const key = `fleet:${opts?.rexId || "all"}`;
+  const data = await cachedFetch<{ ok: boolean; total: number; active: number }>(
+    key,
+    qs ? `/api/sims/fleet?${qs}` : "/api/sims/fleet",
+    4000,
+    opts
+  );
+  return { total: data.total ?? 0, active: data.active ?? 0 };
 }
 
 export interface SimsPageQuery {
@@ -236,4 +271,27 @@ export async function fetchReceivers(
     senders: data.senders ?? [],
     transferCount: data.transferCount ?? 0,
   };
+}
+
+export async function fetchReceiverTransfers(
+  receiverPhone: string,
+  from?: number,
+  to?: number,
+  sender?: string,
+  opts?: { bypassCache?: boolean; noDelay?: boolean; rexId?: string }
+): Promise<Transfer[]> {
+  const params = new URLSearchParams({ receiver: receiverPhone });
+  if (from !== undefined) params.set("from", String(from));
+  if (to !== undefined) params.set("to", String(to));
+  if (sender) params.set("sender", sender);
+  if (opts?.rexId && opts.rexId !== "all") params.set("rexId", opts.rexId);
+
+  const key = `receiverDetail:${receiverPhone}:${from ?? "all"}:${to ?? "all"}:${sender ?? ""}:${opts?.rexId ?? "all"}`;
+  const data = await cachedFetch<{ ok: boolean; transfers: Transfer[] }>(
+    key,
+    `/api/receivers?${params.toString()}`,
+    3000,
+    { noDelay: true, ...opts }
+  );
+  return data.transfers ?? [];
 }

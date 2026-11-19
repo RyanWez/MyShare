@@ -44,8 +44,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       }
       const data = await res.json();
       if (data?.ok && data.user) {
+        const nextRexGroups: RexGroup[] = Array.isArray(data.rexGroups) ? data.rexGroups : [];
         setUser(data.user as SessionUser);
-        setRexGroups(Array.isArray(data.rexGroups) ? data.rexGroups : []);
+        setRexGroups(nextRexGroups);
+        setRexFilter((prev) =>
+          prev !== "all" && !nextRexGroups.some((g) => String(g.id) === prev) ? "all" : prev
+        );
       }
     } catch {
       // ignore transient network failure; pages show their own error banner

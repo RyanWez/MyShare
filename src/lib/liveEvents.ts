@@ -3,7 +3,7 @@
 // One EventSource for the whole app (previously every page opened its own),
 // exposing:
 // - connection status ("connecting" | "online" | "offline") via useLiveStatus
-// - server "update" events via useLive(onUpdate)
+// - server "update" events via useLive(onUpdate, options)
 //
 // Reconnects with exponential backoff (1s → 30s), resets on success, and
 // retries immediately when the tab becomes visible again while offline.
@@ -24,6 +24,15 @@ export interface TransferResultUpdate {
 }
 
 export type LiveUpdate = TransferResultUpdate;
+
+export interface UseLiveOptions {
+  /** Deliver every event synchronously without debouncing (e.g. OS notifications). */
+  immediate?: boolean;
+  /** Trailing debounce window in ms when `immediate` is false (default 550ms). */
+  debounceMs?: number;
+  /** Skip refetches while tab is hidden and fire once when visible again (default true). */
+  pauseWhenHidden?: boolean;
+}
 
 let es: EventSource | null = null;
 let status: LiveStatus = "connecting";
@@ -94,8 +103,8 @@ if (typeof window !== "undefined") {
 }
 
 /** Subscribe to server "update" events; returns the connection status too. */
-export function useLive(onUpdate?: (u?: LiveUpdate) => void): LiveStatus {
-  return useLiveInternal(onUpdate);
+export function useLive(onUpdate?: (u?: LiveUpdate) => void, options?: UseLiveOptions): LiveStatus {
+  return useLiveInternal(onUpdate, options);
 }
 
 /** Connection status only — no update events, no extra fetches on top. */
@@ -119,19 +128,81 @@ function getServerSnapshot(): LiveStatus {
   return "connecting";
 }
 
-function useLiveInternal(onUpdate?: (u?: LiveUpdate) => void): LiveStatus {
+function useLiveInternal(
+  onUpdate?: (u?: LiveUpdate) => void,
+  options?: UseLiveOptions
+): LiveStatus {
   const cbRef = useRef<((u?: LiveUpdate) => void) | undefined>(onUpdate);
   cbRef.current = onUpdate;
+
+  const immediate = options?.immediate ?? false;
+  const debounceMs = options?.debounceMs ?? 550;
+  const pauseWhenHidden = options?.pauseWhenHidden ?? true;
 
   useEffect(() => {
     ensureConnected();
     if (!cbRef.current) return;
-    const fn = (u?: LiveUpdate) => cbRef.current?.(u);
+
+    if (immediate) {
+      const fn = (u?: LiveUpdate) => {
+        if (pauseWhenHidden && document.visibilityState === "hidden") return;
+        cbRef.current?.(u);
+      };
+      updateListeners.add(fn);
+      return () => {
+        updateListeners.delete(fn);
+      };
+    }
+
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let pendingWhileHidden = false;
+    let lastUpdate: LiveUpdate | undefined = undefined;
+
+    const flush = () => {
+      timer = null;
+      pendingWhileHidden = false;
+      const u = lastUpdate;
+      lastUpdate = undefined;
+      cbRef.current?.(u);
+    };
+
+    const fn = (u?: LiveUpdate) => {
+      lastUpdate = u;
+      if (pauseWhenHidden && document.visibilityState === "hidden") {
+        pendingWhileHidden = true;
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        return;
+      }
+      if (debounceMs <= 0) {
+        flush();
+        return;
+      }
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(flush, debounceMs);
+    };
+
+    const onVisibility = () => {
+      if (document.visibilityState === "visible" && pendingWhileHidden) {
+        flush();
+      }
+    };
+
     updateListeners.add(fn);
+    if (pauseWhenHidden) {
+      document.addEventListener("visibilitychange", onVisibility);
+    }
+
     return () => {
       updateListeners.delete(fn);
+      if (timer) clearTimeout(timer);
+      if (pauseWhenHidden) {
+        document.removeEventListener("visibilitychange", onVisibility);
+      }
     };
-  }, []);
+  }, [immediate, debounceMs, pauseWhenHidden]);
 
   return useSyncExternalStore(subscribeStatus, getStatusSnapshot, getServerSnapshot);
 }

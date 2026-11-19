@@ -15,7 +15,19 @@ export async function GET(req: NextRequest) {
   };
 
   const sender = params.get("sender")?.trim() || undefined;
+  const receiver = params.get("receiver")?.trim() || undefined;
   const rexId = resolveScopedRexId(auth.user, params.get("rexId"));
+
+  if (receiver) {
+    const transfers = await dbApi.receiverTransfers(
+      receiver,
+      parseTs("from"),
+      parseTs("to"),
+      sender,
+      rexId
+    );
+    return NextResponse.json({ ok: true, transfers });
+  }
 
   const { groups, senders, transferCount } = await dbApi.receiversInRange(
     parseTs("from"),

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
 import { ArrowRight, Check, ClipboardPaste, Search, SquareStack, X } from "lucide-react";
@@ -25,6 +25,8 @@ import type { Sim } from "@/lib/types";
 
 const QUICK = [500, 800, 1000, 5000];
 const RESEND_COOLDOWN = 60;
+const SEARCH_DEBOUNCE_MS = 250;
+const TRANSFER_SIM_LIMIT = 48;
 const STEPS = ["Sender", "OTP", "Confirm"];
 
 /**
@@ -75,12 +77,16 @@ interface Snapshot {
 export default function TransferPage() {
   const { loading: sessionLoading, permissions, rexFilter } = useSession();
   const [sims, setSims] = useState<Sim[]>([]);
+  const [totalSims, setTotalSims] = useState(0);
+  const [activeTotal, setActiveTotal] = useState(0);
+  const [selectedCache, setSelectedCache] = useState<Sim | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [sender, setSender] = useSessionState("transfer_sender", "");
   const [receiver, setReceiver] = useSessionState("transfer_receiver", "");
   const [amount, setAmount] = useSessionState("transfer_amount", "5000");
   const [otp, setOtp] = useSessionState("transfer_otp", "");
   const [searchQuery, setSearchQuery] = useState("");
+  const [committedQuery, setCommittedQuery] = useState("");
 
   const [stage, setStage] = useSessionState<"form" | "otp" | "done">("transfer_stage", "form");
   const [busy, setBusy] = useState(false);
@@ -88,52 +94,77 @@ export default function TransferPage() {
   const [receipt, setReceipt] = useSessionState<Snapshot | null>("transfer_receipt", null);
   const [recentContacts, setRecentContacts] = useLocalState<string[]>("recent_contacts", []);
   const [resendAt, setResendAt] = useSessionState("transfer_resendAt", 0);
+  const requestSeq = useRef(0);
+  const senderRef = useRef(sender);
+  senderRef.current = sender;
+
+  useEffect(() => {
+    const t = setTimeout(() => setCommittedQuery(searchQuery.trim()), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [searchQuery]);
 
   // Only the boolean lives here; the ticking digit is a leaf, so the whole form —
   // SIM chips, limit bars, receipt — isn't re-rendered once a second.
   const cooldownActive = useCooldownActive(resendAt);
 
-  const loadSims = useCallback(() => {
-    if (sessionLoading || !permissions.transfer.view) return Promise.resolve();
-    return fetchSims({ rexId: rexFilter })
-      .then((all) => {
-        setSims(all);
-        setSender((cur) => {
-          if (cur && all.some((s) => s.phone === cur && s.status === "active")) return cur;
-          return all.find((s) => s.status === "active")?.phone ?? "";
-        });
+  const loadSims = useCallback(
+    (bypass = false) => {
+      if (sessionLoading || !permissions.transfer.view) return Promise.resolve();
+      const seq = ++requestSeq.current;
+      const curSender = senderRef.current;
+      return fetchSims({
+        rexId: rexFilter,
+        q: committedQuery || undefined,
+        includePhone: !committedQuery && curSender ? curSender : undefined,
+        limit: TRANSFER_SIM_LIMIT,
+        bypassCache: bypass,
+        noDelay: true,
       })
-      .catch(() => {})
-      .finally(() => setLoaded(true));
-  }, [setSender, rexFilter, sessionLoading, permissions.transfer.view]);
+        .then((res) => {
+          if (seq !== requestSeq.current) return;
+          const all = res.sims;
+          setSims(all);
+          setTotalSims(res.total);
+          setActiveTotal(res.activeTotal);
+          const matchInList = curSender ? all.find((s) => s.phone === curSender) : undefined;
+          if (matchInList) {
+            setSelectedCache(matchInList);
+          }
+          if (!committedQuery) {
+            setSender((cur) => {
+              if (cur && all.some((s) => s.phone === cur && s.status === "active")) return cur;
+              const fallback = all.find((s) => s.status === "active");
+              if (fallback) setSelectedCache(fallback);
+              return fallback?.phone ?? "";
+            });
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (seq === requestSeq.current) setLoaded(true);
+        });
+    },
+    [setSender, rexFilter, committedQuery, sessionLoading, permissions.transfer.view]
+  );
 
   useEffect(() => {
     loadSims();
   }, [loadSims]);
 
-  const selected = sims.find((s) => s.phone === sender);
+  const selected = sims.find((s) => s.phone === sender) ?? (selectedCache?.phone === sender ? selectedCache : undefined);
   const senderBalance = selected?.balance ?? null;
-  // Pickable SIMs first. Unusable ones still render — so it's clear why a SIM is
-  // missing — but they belong after the choices, not above them.
-  // Derived inside the memo: a filter() in the dependency array is a fresh array
-  // every render, which made this and displayedSims recompute unconditionally.
+  // Server already orders active SIMs first; preserve that cleanly.
   const orderedSims = useMemo(() => {
     const active = sims.filter((s) => s.status === "active");
     return [...active, ...sims.filter((s) => s.status !== "active")];
   }, [sims]);
-  const activeSims = useMemo(() => sims.filter((s) => s.status === "active"), [sims]);
 
   const displayedSims = useMemo(() => {
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase().replace(/[\s-+]/g, "");
-      return orderedSims.filter((s) => {
-        const phoneClean = s.phone.toLowerCase().replace(/[\s-+]/g, "");
-        const noteMatch = s.note ? s.note.toLowerCase().includes(searchQuery.toLowerCase()) : false;
-        return phoneClean.includes(q) || noteMatch;
-      });
+    if (committedQuery || searchQuery.trim()) {
+      return orderedSims.slice(0, 12);
     }
 
-    // Default: Show up to 6 SIMs
+    // Default: Show up to 6 SIMs (ensuring selected sender stays visible)
     const top6 = orderedSims.slice(0, 6);
     if (sender && !top6.some((s) => s.phone === sender)) {
       const currentSelected = orderedSims.find((s) => s.phone === sender);
@@ -142,7 +173,7 @@ export default function TransferPage() {
       }
     }
     return top6;
-  }, [orderedSims, searchQuery, sender]);
+  }, [orderedSims, committedQuery, searchQuery, sender]);
   const amt = Number(amount);
   const fee = Number.isFinite(amt) ? Math.round(amt * 0.05) : 0;
   const total = amt + fee;
@@ -240,7 +271,7 @@ export default function TransferPage() {
           description: `${fmtKs(amt)} to ${fmtPhoneGrouped(receiver)}.`,
         });
         invalidateCache();
-        loadSims();
+        loadSims(true);
         setRecentContacts((prev) => {
           const filtered = prev.filter((p) => p !== receiver);
           return [receiver, ...filtered].slice(0, 3);
@@ -280,7 +311,7 @@ export default function TransferPage() {
     );
   }
 
-  if (loaded && activeSims.length === 0 && stage === "form") {
+  if (loaded && !committedQuery && activeTotal === 0 && stage === "form") {
     return (
       <EmptyState
         icon={
@@ -359,9 +390,9 @@ export default function TransferPage() {
         <div className="flex flex-wrap items-center justify-between gap-2.5">
           <div className="flex items-center gap-2">
             <Eyebrow>From</Eyebrow>
-            {sims.length > 6 && !searchQuery.trim() && (
+            {totalSims > 6 && !searchQuery.trim() && (
               <span className="font-mono text-eyebrow uppercase text-ink-faint">
-                ({Math.min(6, displayedSims.length)} of {sims.length})
+                ({Math.min(6, displayedSims.length)} of {totalSims})
               </span>
             )}
           </div>
@@ -415,7 +446,11 @@ export default function TransferPage() {
                   key={s.phone}
                   sim={s}
                   selected={s.phone === sender}
-                  onSelect={(sim) => !locked && setSender(sim.phone)}
+                  onSelect={(sim) => {
+                    if (locked) return;
+                    setSelectedCache(sim);
+                    setSender(sim.phone);
+                  }}
                 />
               ))}
             </div>

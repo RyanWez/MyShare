@@ -24,23 +24,26 @@ export default function NotificationBridge() {
     };
   }, []);
 
-  useLive((u?: LiveUpdate) => {
-    if (!u || u.kind !== "transfer:result") return;
-    if (document.visibilityState === "visible") return;
-    if (!notifEnabled()) return;
+  useLive(
+    (u?: LiveUpdate) => {
+      if (!u || u.kind !== "transfer:result") return;
+      if (document.visibilityState === "visible") return;
+      if (!notifEnabled()) return;
 
-    const ok = u.status === "success";
-    const title = ok ? "Transfer sent ✓" : "Transfer failed";
-    let body = `Ks ${u.amount.toLocaleString()} → ${u.receiver}`;
-    if (!ok && u.message) body += ` — ${u.message}`;
+      const ok = u.status === "success";
+      const title = ok ? "Transfer sent ✓" : "Transfer failed";
+      let body = `Ks ${u.amount.toLocaleString()} → ${u.receiver}`;
+      if (!ok && u.message) body += ` — ${u.message}`;
 
-    void showNotif(title, {
-      body,
-      tag: `ms-transfer-${u.id}`,
-    });
-    chime(ok);
-    document.title = "🔔 MyShare";
-  });
+      void showNotif(title, {
+        body,
+        tag: `ms-transfer-${u.id}`,
+      });
+      chime(ok);
+      document.title = "🔔 MyShare";
+    },
+    { immediate: true, pauseWhenHidden: false }
+  );
 
   return null;
 }

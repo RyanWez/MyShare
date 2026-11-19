@@ -1,59 +1,70 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { useRouter } from "next/navigation";
 import { invalidateCache } from "@/lib/api";
 
-// 1 hour in milliseconds
-const INACTIVITY_LIMIT = 60 * 60 * 1000;
+// 8 hours in milliseconds
+const INACTIVITY_LIMIT = 8 * 60 * 60 * 1000;
 
 export function InactivityProvider({ children }: { children: React.ReactNode }) {
-  const router = useRouter();
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastActivityRef = useRef<number>(Date.now());
+  const loggingOutRef = useRef(false);
 
   useEffect(() => {
-    function resetTimer() {
+    lastActivityRef.current = Date.now();
+
+    async function forceLogout() {
+      if (loggingOutRef.current) return;
+      loggingOutRef.current = true;
+      try {
+        await fetch("/api/auth/logout", { method: "POST" });
+      } catch {}
+      invalidateCache();
+      window.location.assign("/login");
+    }
+
+    function scheduleCheck(delayMs: number) {
       if (timerRef.current) {
         clearTimeout(timerRef.current);
       }
-      timerRef.current = setTimeout(async () => {
-        try {
-          await fetch("/api/auth/logout", { method: "POST" });
-        } catch {}
-        invalidateCache();
-        window.location.assign("/login");
-      }, INACTIVITY_LIMIT);
+      timerRef.current = setTimeout(() => {
+        const elapsed = Date.now() - lastActivityRef.current;
+        if (elapsed >= INACTIVITY_LIMIT) {
+          void forceLogout();
+        } else {
+          scheduleCheck(INACTIVITY_LIMIT - elapsed);
+        }
+      }, delayMs);
     }
 
-    // Set initial timer
-    resetTimer();
-
-    // Listen to user activity
-    const events = ["mousedown", "mousemove", "keypress", "scroll", "touchstart"];
-    
-    // Throttle the reset so we aren't calling clearTimeout on every pixel of mouse movement
-    let ticking = false;
     function handleActivity() {
-      if (!ticking) {
-        window.requestAnimationFrame(() => {
-          resetTimer();
-          ticking = false;
-        });
-        ticking = true;
+      lastActivityRef.current = Date.now();
+    }
+
+    function handleVisibilityChange() {
+      if (document.visibilityState !== "visible") return;
+      if (Date.now() - lastActivityRef.current >= INACTIVITY_LIMIT) {
+        void forceLogout();
       }
     }
 
+    scheduleCheck(INACTIVITY_LIMIT);
+
+    const events = ["mousedown", "mousemove", "keydown", "scroll", "touchstart"];
     for (const event of events) {
       window.addEventListener(event, handleActivity, { passive: true });
     }
+    document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
       for (const event of events) {
         window.removeEventListener(event, handleActivity);
       }
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [router]);
+  }, []);
 
   return <>{children}</>;
 }

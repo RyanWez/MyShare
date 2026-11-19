@@ -2,13 +2,15 @@
 
 import * as React from "react";
 import { createPortal } from "react-dom";
-import { Check, ChevronDown } from "lucide-react";
+import { Check, ChevronDown, Search, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export interface SelectOption<T extends string = string> {
   value: T;
   label: string;
   disabled?: boolean;
+  /** Optional text matched by the search input instead of `label`. */
+  searchText?: string;
 }
 
 export interface SelectProps<T extends string = string> {
@@ -24,6 +26,10 @@ export interface SelectProps<T extends string = string> {
   /** Render option text in tabular monospace (ideal for phone numbers). */
   mono?: boolean;
   align?: "left" | "right";
+  /** Show a pinned search input at the top of the dropdown menu. */
+  searchable?: boolean;
+  searchPlaceholder?: string;
+  emptySearchText?: string;
 }
 
 interface Placement {
@@ -35,26 +41,34 @@ interface Placement {
 
 const VIEWPORT_MARGIN = 8;
 const MENU_GAP = 6;
-const MENU_MAX_H = 260;
+const MENU_MAX_H = 264;
+const SEARCH_HEADER_H = 44;
 const CLOSE_ANIM_MS = 160;
 
 /**
- * Compute viewport-clamped anchor coordinates from the trigger rect and either
- * the measured menu dimensions or a fast initial estimate (so frame 1 already
- * lands on the trigger with zero off-screen flash or coordinate interpolation).
+ * Compute anchor coordinates from the trigger rect and either the measured menu
+ * dimensions or a fast initial estimate (so frame 1 already lands on the
+ * trigger with zero off-screen flash or coordinate interpolation).
  */
 function computePlacement(
   trigger: HTMLElement,
   align: "left" | "right",
   estimatedItemCount: number,
-  menu?: HTMLElement | null
+  searchable: boolean,
+  menu?: HTMLElement | null,
+  portalHost?: HTMLElement | null
 ): Placement {
   const anchor = trigger.getBoundingClientRect();
-  const minWidth = Math.max(anchor.width, 180);
+  const minWidth = Math.max(anchor.width, searchable ? 210 : 180);
   const menuWidth = menu && menu.offsetWidth > 0 ? Math.max(menu.offsetWidth, minWidth) : minWidth;
-  const estHeight = Math.min(Math.max(estimatedItemCount, 1) * 32 + 10, MENU_MAX_H);
-  const menuHeight =
-    menu && menu.scrollHeight > 0 ? Math.min(menu.scrollHeight, MENU_MAX_H) : estHeight;
+  const estHeight = Math.min(
+    Math.max(estimatedItemCount, 1) * 32 + (searchable ? SEARCH_HEADER_H + 10 : 10),
+    MENU_MAX_H
+  );
+  const measuredHeight = menu
+    ? Math.min(Math.max(menu.offsetHeight, menu.scrollHeight), MENU_MAX_H)
+    : estHeight;
+  const menuHeight = measuredHeight > 0 ? measuredHeight : estHeight;
 
   let left = align === "right" ? anchor.right - menuWidth : anchor.left;
   left = Math.max(
@@ -69,16 +83,26 @@ function computePlacement(
     ? Math.max(VIEWPORT_MARGIN, anchor.top - MENU_GAP - menuHeight)
     : anchor.bottom + MENU_GAP;
 
+  if (portalHost) {
+    const hostRect = portalHost.getBoundingClientRect();
+    return {
+      left: left - (hostRect.left + portalHost.clientLeft),
+      top: top - (hostRect.top + portalHost.clientTop),
+      minWidth,
+      openUp,
+    };
+  }
+
   return { left, top, minWidth, openUp };
 }
 
 /**
  * Custom elevated dropdown replacing native `<select>`.
  *
- * Portalled to `document.body` with viewport-aware collision flipping, explicit
- * `pointer-events-auto` (so it stays clickable inside Radix modal Dialogs where
- * `body` has `pointer-events: none`), and compositor-only wave animations so
- * `left`/`top` coordinates never transition across the viewport.
+ * Portalled to `document.body` (or the enclosing `[role="dialog"]` when inside a
+ * modal so Radix FocusScope allows typing in the search input) with
+ * viewport-aware collision flipping, explicit `pointer-events-auto`, and
+ * compositor-only wave animations.
  */
 export function Select<T extends string = string>({
   value,
@@ -92,6 +116,9 @@ export function Select<T extends string = string>({
   triggerClassName,
   mono = false,
   align = "left",
+  searchable = false,
+  searchPlaceholder = "Search…",
+  emptySearchText = "No matching options",
 }: SelectProps<T>) {
   const [open, setOpen] = React.useState(false);
   const [renderMenu, setRenderMenu] = React.useState(false);
@@ -99,9 +126,13 @@ export function Select<T extends string = string>({
   const [mounted, setMounted] = React.useState(false);
   const [activeIndex, setActiveIndex] = React.useState(-1);
   const [placement, setPlacement] = React.useState<Placement | null>(null);
+  const [searchQuery, setSearchQuery] = React.useState("");
+  const [portalHost, setPortalHost] = React.useState<HTMLElement | null>(null);
 
   const triggerRef = React.useRef<HTMLButtonElement>(null);
   const menuRef = React.useRef<HTMLDivElement>(null);
+  const listRef = React.useRef<HTMLDivElement>(null);
+  const searchInputRef = React.useRef<HTMLInputElement>(null);
   const closeTimerRef = React.useRef<number | null>(null);
   const listId = React.useId();
 
@@ -118,19 +149,34 @@ export function Select<T extends string = string>({
   );
   const selected = selectedIndex >= 0 ? options[selectedIndex] : undefined;
 
+  const visibleOptions = React.useMemo(() => {
+    if (!searchable) return options;
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return options;
+    return options.filter((o) => {
+      const haystack = (o.searchText ?? o.label).toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [options, searchable, searchQuery]);
+
   const openMenu = React.useCallback(() => {
     if (disabled) return;
     if (closeTimerRef.current !== null) {
       window.clearTimeout(closeTimerRef.current);
       closeTimerRef.current = null;
     }
+    const dialogHost = triggerRef.current?.closest<HTMLElement>("[role='dialog']") ?? null;
+    setPortalHost(dialogHost);
+    setSearchQuery("");
     if (triggerRef.current) {
-      setPlacement(computePlacement(triggerRef.current, align, options.length));
+      setPlacement(
+        computePlacement(triggerRef.current, align, options.length, searchable, null, dialogHost)
+      );
     }
     setClosing(false);
     setRenderMenu(true);
     setOpen(true);
-  }, [disabled, align, options.length]);
+  }, [disabled, align, options.length, searchable]);
 
   const closeMenu = React.useCallback(() => {
     setOpen(false);
@@ -144,6 +190,7 @@ export function Select<T extends string = string>({
         setRenderMenu(false);
         setClosing(false);
         setPlacement(null);
+        setSearchQuery("");
         closeTimerRef.current = null;
       },
       reduced ? 10 : CLOSE_ANIM_MS
@@ -154,7 +201,14 @@ export function Select<T extends string = string>({
     const trigger = triggerRef.current;
     const menu = menuRef.current;
     if (!trigger) return;
-    const next = computePlacement(trigger, align, options.length, menu);
+    const next = computePlacement(
+      trigger,
+      align,
+      visibleOptions.length,
+      searchable,
+      menu,
+      portalHost
+    );
     setPlacement((prev) =>
       prev &&
       Math.abs(prev.left - next.left) < 0.5 &&
@@ -164,7 +218,7 @@ export function Select<T extends string = string>({
         ? prev
         : next
     );
-  }, [align, options.length]);
+  }, [align, visibleOptions.length, searchable, portalHost]);
 
   // Refine placement against actual rendered dimensions before the first paint,
   // and keep aligned when the window or an ancestor container scrolls/resizes.
@@ -173,7 +227,9 @@ export function Select<T extends string = string>({
     updatePlacement();
 
     const handleScroll = (e: Event) => {
-      if (menuRef.current && e.target === menuRef.current) return;
+      if (menuRef.current && (e.target === menuRef.current || e.target === listRef.current)) {
+        return;
+      }
       updatePlacement();
     };
     window.addEventListener("resize", updatePlacement);
@@ -184,28 +240,42 @@ export function Select<T extends string = string>({
     };
   }, [open, renderMenu, updatePlacement]);
 
-  // Seed highlight at the current selection whenever opened.
+  // Focus the search input when opened in searchable mode.
+  React.useEffect(() => {
+    if (!open || !searchable) return;
+    const raf = window.requestAnimationFrame(() => {
+      searchInputRef.current?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(raf);
+  }, [open, searchable]);
+
+  // Seed highlight at the current selection (or first filtered match when searching).
   React.useEffect(() => {
     if (!open) return;
-    const firstEnabled = options.findIndex((o) => !o.disabled);
-    setActiveIndex(selectedIndex >= 0 ? selectedIndex : firstEnabled);
-  }, [open, selectedIndex, options]);
+    const firstEnabled = visibleOptions.findIndex((o) => !o.disabled);
+    if (searchable && searchQuery.trim().length > 0) {
+      setActiveIndex(firstEnabled);
+      return;
+    }
+    const visSelected = visibleOptions.findIndex((o) => o.value === value);
+    setActiveIndex(visSelected >= 0 ? visSelected : firstEnabled);
+  }, [open, value, visibleOptions, searchable, searchQuery]);
 
-  // Keep keyboard-focused option scrolled into view INSIDE the menu only
-  // (never using scrollIntoView(), which can jerk outer scroll containers).
+  // Keep keyboard-focused option scrolled into view INSIDE the options container only.
   React.useEffect(() => {
-    if (!open || activeIndex < 0 || !menuRef.current) return;
-    const menu = menuRef.current;
-    const row = menu.querySelectorAll<HTMLElement>("[role='option']")[activeIndex];
+    if (!open || activeIndex < 0) return;
+    const scroller = searchable ? listRef.current : menuRef.current;
+    if (!scroller) return;
+    const row = scroller.querySelectorAll<HTMLElement>("[role='option']")[activeIndex];
     if (!row) return;
     const rowTop = row.offsetTop;
     const rowBottom = rowTop + row.offsetHeight;
-    if (rowTop < menu.scrollTop + 4) {
-      menu.scrollTop = Math.max(0, rowTop - 4);
-    } else if (rowBottom > menu.scrollTop + menu.clientHeight - 4) {
-      menu.scrollTop = rowBottom - menu.clientHeight + 4;
+    if (rowTop < scroller.scrollTop + 4) {
+      scroller.scrollTop = Math.max(0, rowTop - 4);
+    } else if (rowBottom > scroller.scrollTop + scroller.clientHeight - 4) {
+      scroller.scrollTop = rowBottom - scroller.clientHeight + 4;
     }
-  }, [open, activeIndex]);
+  }, [open, activeIndex, searchable]);
 
   React.useEffect(() => {
     if (!open) return;
@@ -222,11 +292,11 @@ export function Select<T extends string = string>({
   }, [open, closeMenu]);
 
   function moveActive(step: 1 | -1) {
-    if (options.length === 0) return;
+    if (visibleOptions.length === 0) return;
     let idx = activeIndex < 0 ? (step > 0 ? -1 : 0) : activeIndex;
-    for (let i = 0; i < options.length; i++) {
-      idx = (idx + step + options.length) % options.length;
-      if (!options[idx].disabled) {
+    for (let i = 0; i < visibleOptions.length; i++) {
+      idx = (idx + step + visibleOptions.length) % visibleOptions.length;
+      if (!visibleOptions[idx].disabled) {
         setActiveIndex(idx);
         return;
       }
@@ -261,15 +331,17 @@ export function Select<T extends string = string>({
         moveActive(-1);
         break;
       case "Home": {
+        if (searchable && document.activeElement === searchInputRef.current) return;
         e.preventDefault();
-        const first = options.findIndex((o) => !o.disabled);
+        const first = visibleOptions.findIndex((o) => !o.disabled);
         if (first >= 0) setActiveIndex(first);
         break;
       }
       case "End": {
+        if (searchable && document.activeElement === searchInputRef.current) return;
         e.preventDefault();
-        for (let i = options.length - 1; i >= 0; i--) {
-          if (!options[i].disabled) {
+        for (let i = visibleOptions.length - 1; i >= 0; i--) {
+          if (!visibleOptions[i].disabled) {
             setActiveIndex(i);
             break;
           }
@@ -277,10 +349,16 @@ export function Select<T extends string = string>({
         break;
       }
       case "Enter":
-      case " ":
         e.preventDefault();
-        if (activeIndex >= 0 && options[activeIndex]) {
-          selectOption(options[activeIndex]);
+        if (activeIndex >= 0 && visibleOptions[activeIndex]) {
+          selectOption(visibleOptions[activeIndex]);
+        }
+        break;
+      case " ":
+        if (searchable && document.activeElement === searchInputRef.current) return;
+        e.preventDefault();
+        if (activeIndex >= 0 && visibleOptions[activeIndex]) {
+          selectOption(visibleOptions[activeIndex]);
         }
         break;
       case "Escape":
@@ -293,15 +371,17 @@ export function Select<T extends string = string>({
         closeMenu();
         break;
       default:
-        if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (!searchable && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
           const char = e.key.toLowerCase();
-          const match = options.findIndex(
+          const match = visibleOptions.findIndex(
             (o, idx) => !o.disabled && idx > activeIndex && o.label.toLowerCase().startsWith(char)
           );
           const wrapMatch =
             match >= 0
               ? match
-              : options.findIndex((o) => !o.disabled && o.label.toLowerCase().startsWith(char));
+              : visibleOptions.findIndex(
+                  (o) => !o.disabled && o.label.toLowerCase().startsWith(char)
+                );
           if (wrapMatch >= 0) setActiveIndex(wrapMatch);
         }
     }
@@ -322,6 +402,8 @@ export function Select<T extends string = string>({
     : placement?.openUp
       ? "dropdown-wave-in-up"
       : "dropdown-wave-in-down";
+
+  const portalContainer = portalHost ?? (mounted ? document.body : null);
 
   return (
     <div className={cn("relative inline-block", className)}>
@@ -365,12 +447,13 @@ export function Select<T extends string = string>({
       {mounted &&
         renderMenu &&
         placement &&
+        portalContainer &&
         createPortal(
           <div
             ref={menuRef}
             id={listId}
-            role="listbox"
-            aria-label={ariaLabel}
+            role={searchable ? undefined : "listbox"}
+            aria-label={searchable ? undefined : ariaLabel}
             onKeyDown={handleKeyDown}
             onMouseDown={(e) => {
               // Keep focus clean and prevent outside-dialog dismiss interference.
@@ -382,54 +465,101 @@ export function Select<T extends string = string>({
               minWidth: placement.minWidth,
             }}
             className={cn(
-              "fixed z-[60] max-h-[260px] overflow-y-auto rounded-lg border border-hairline-strong/80 bg-card/95 p-1 shadow-dialog",
+              portalHost ? "absolute" : "fixed",
+              "z-[60] rounded-lg border border-hairline-strong/80 bg-card/95 shadow-dialog",
+              searchable ? "flex max-h-[264px] flex-col overflow-hidden" : "max-h-[260px] overflow-y-auto p-1",
               "ring-1 ring-inset ring-white/[0.04] backdrop-blur-md transition-none will-change-[transform,opacity]",
               closing ? "pointer-events-none" : "pointer-events-auto",
               originClass,
               animClass
             )}
           >
-            {options.map((opt, idx) => {
-              const isSelected = opt.value === value;
-              const isActive = idx === activeIndex;
-              return (
-                <button
-                  key={opt.value}
-                  type="button"
-                  role="option"
-                  aria-selected={isSelected}
-                  disabled={opt.disabled}
-                  onMouseEnter={() => !opt.disabled && setActiveIndex(idx)}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    selectOption(opt);
-                  }}
-                  className={cn(
-                    "flex w-full items-center justify-between gap-3 rounded-md px-2.5 py-2 sm:py-1.5 text-left text-xs transition-colors duration-100",
-                    mono && "font-mono tnum",
-                    opt.disabled
-                      ? "cursor-not-allowed opacity-40"
-                      : isSelected
-                        ? "bg-brass-wash/75 font-medium text-ink"
-                        : isActive
-                          ? "bg-substrate text-ink"
-                          : "text-ink-soft hover:bg-substrate hover:text-ink"
-                  )}
-                >
-                  <span className="truncate">{opt.label}</span>
-                  <Check
-                    className={cn(
-                      "h-3.5 w-3.5 shrink-0 transition-opacity duration-150",
-                      isSelected ? "opacity-100 text-brass" : "opacity-0"
-                    )}
-                    strokeWidth={2.25}
-                    aria-hidden="true"
+            {searchable && (
+              <div className="shrink-0 border-b border-hairline p-1.5">
+                <div className="relative">
+                  <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-faint" />
+                  <input
+                    ref={searchInputRef}
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder={searchPlaceholder}
+                    aria-label={searchPlaceholder}
+                    autoComplete="off"
+                    spellCheck={false}
+                    className="h-8 w-full rounded border border-hairline bg-substrate/80 pl-7 pr-7 font-mono text-xs text-ink placeholder:text-ink-faint focus:border-brass focus:bg-card focus:outline-none focus:ring-1 focus:ring-brass"
                   />
-                </button>
-              );
-            })}
+                  {searchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSearchQuery("");
+                        searchInputRef.current?.focus();
+                      }}
+                      aria-label="Clear search"
+                      className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-ink-faint hover:text-ink"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div
+              ref={listRef}
+              role={searchable ? "listbox" : undefined}
+              aria-label={searchable ? ariaLabel : undefined}
+              className={cn(searchable && "relative max-h-[212px] overflow-y-auto p-1")}
+            >
+              {visibleOptions.length === 0 ? (
+                <div className="px-2.5 py-4 text-center font-mono text-[11px] text-ink-mute">
+                  {emptySearchText}
+                </div>
+              ) : (
+                visibleOptions.map((opt, idx) => {
+                  const isSelected = opt.value === value;
+                  const isActive = idx === activeIndex;
+                  return (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      role="option"
+                      aria-selected={isSelected}
+                      disabled={opt.disabled}
+                      onMouseEnter={() => !opt.disabled && setActiveIndex(idx)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        selectOption(opt);
+                      }}
+                      className={cn(
+                        "flex w-full items-center justify-between gap-3 rounded-md px-2.5 py-2 sm:py-1.5 text-left text-xs transition-colors duration-100",
+                        mono && "font-mono tnum",
+                        opt.disabled
+                          ? "cursor-not-allowed opacity-40"
+                          : isSelected
+                            ? "bg-brass-wash/75 font-medium text-ink"
+                            : isActive
+                              ? "bg-substrate text-ink"
+                              : "text-ink-soft hover:bg-substrate hover:text-ink"
+                      )}
+                    >
+                      <span className="truncate">{opt.label}</span>
+                      <Check
+                        className={cn(
+                          "h-3.5 w-3.5 shrink-0 transition-opacity duration-150",
+                          isSelected ? "opacity-100 text-brass" : "opacity-0"
+                        )}
+                        strokeWidth={2.25}
+                        aria-hidden="true"
+                      />
+                    </button>
+                  );
+                })
+              )}
+            </div>
           </div>,
-          document.body
+          portalContainer
         )}
     </div>
   );

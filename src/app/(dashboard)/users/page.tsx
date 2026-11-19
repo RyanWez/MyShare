@@ -10,10 +10,8 @@ import {
   FolderPlus,
   KeyRound,
   Layers,
-  Plus,
   RefreshCw,
   Search,
-  Shield,
   Trash2,
   UserCheck,
   UserPlus,
@@ -72,6 +70,16 @@ async function copyText(text: string) {
   }
 }
 
+function findDuplicateRex(
+  groups: RexGroup[],
+  name: string,
+  excludeId?: number
+): RexGroup | null {
+  const clean = name.trim().toLowerCase();
+  if (!clean) return null;
+  return groups.find((g) => g.id !== excludeId && g.name.toLowerCase() === clean) ?? null;
+}
+
 export default function UsersPage() {
   const { user: currentUser, loading: sessionLoading, permissions, refreshSession } = useSession();
 
@@ -83,6 +91,8 @@ export default function UsersPage() {
 
   const [search, setSearch] = React.useState("");
   const [rexFilter, setRexFilter] = React.useState("all");
+  const [roleFilter, setRoleFilter] = React.useState("all");
+  const [rexSearch, setRexSearch] = React.useState("");
 
   // Create User Dialog
   const [createOpen, setCreateOpen] = React.useState(false);
@@ -120,10 +130,11 @@ export default function UsersPage() {
   // Delete User Dialog
   const [deleteUser, setDeleteUser] = React.useState<UserItem | null>(null);
 
-  // Rex Group Modal (Create / Rename)
+  // Rex Group Modal (Create / Rename / Delete)
   const [rexDialogOpen, setRexDialogOpen] = React.useState(false);
   const [editingRex, setEditingRex] = React.useState<RexGroup | null>(null);
   const [rexInputName, setRexInputName] = React.useState("");
+  const [deleteRex, setDeleteRex] = React.useState<RexGroup | null>(null);
 
   const loadData = React.useCallback(async () => {
     if (sessionLoading || !permissions.users.manage) return;
@@ -155,11 +166,20 @@ export default function UsersPage() {
     [roles, editRoleId]
   );
 
-  const duplicateRexName = React.useMemo(() => {
-    const clean = newRexName.trim().toLowerCase();
-    if (!clean) return null;
-    return rexGroups.find((g) => g.name.toLowerCase() === clean) ?? null;
-  }, [newRexName, rexGroups]);
+  const duplicateRexName = React.useMemo(
+    () => findDuplicateRex(rexGroups, newRexName),
+    [rexGroups, newRexName]
+  );
+
+  const duplicateEditRexName = React.useMemo(
+    () => findDuplicateRex(rexGroups, editRexName),
+    [rexGroups, editRexName]
+  );
+
+  const duplicateModalRexName = React.useMemo(
+    () => findDuplicateRex(rexGroups, rexInputName, editingRex?.id),
+    [rexGroups, rexInputName, editingRex?.id]
+  );
 
   function openCreateDialog() {
     const staffRole = roles.find((r) => r.name.toLowerCase() === "staff") ?? roles[0];
@@ -358,12 +378,36 @@ export default function UsersPage() {
     }
   }
 
+  async function handleDeleteRex() {
+    if (!deleteRex || saving) return;
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/rex/${deleteRex.id}`, { method: "DELETE" });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || "Failed to delete Rex category");
+      toast.success(`Deleted "${deleteRex.name}"`);
+      if (rexFilter === String(deleteRex.id)) {
+        setRexFilter("all");
+      }
+      setDeleteRex(null);
+      await loadData();
+      await refreshSession();
+    } catch (err: any) {
+      toast.error(err?.message || "Couldn't delete Rex category");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   const filteredUsers = React.useMemo(() => {
     const q = search.trim().toLowerCase();
     return users.filter((u) => {
       if (rexFilter !== "all") {
         if (rexFilter === "none" && u.rex_id !== null) return false;
         if (rexFilter !== "none" && String(u.rex_id) !== rexFilter) return false;
+      }
+      if (roleFilter !== "all" && String(u.role_id) !== roleFilter) {
+        return false;
       }
       if (!q) return true;
       return (
@@ -372,7 +416,13 @@ export default function UsersPage() {
         (u.rex_name ? u.rex_name.toLowerCase().includes(q) : false)
       );
     });
-  }, [users, search, rexFilter]);
+  }, [users, search, rexFilter, roleFilter]);
+
+  const filteredRexGroups = React.useMemo(() => {
+    const q = rexSearch.trim().toLowerCase();
+    if (!q) return rexGroups;
+    return rexGroups.filter((g) => g.name.toLowerCase().includes(q));
+  }, [rexGroups, rexSearch]);
 
   if (!sessionLoading && !permissions.users.manage) {
     return (
@@ -428,11 +478,28 @@ export default function UsersPage() {
             aria-label="Filter users by Rex"
             value={rexFilter}
             onValueChange={setRexFilter}
-            triggerClassName="min-w-[140px]"
+            searchable
+            searchPlaceholder="Search Rex…"
+            triggerClassName="min-w-[150px]"
             options={[
-              { value: "all", label: "All Rex groups" },
-              { value: "none", label: "Global (All Rex)" },
-              ...rexGroups.map((g) => ({ value: String(g.id), label: g.name })),
+              { value: "all", label: "All Rex groups", searchText: "All Rex groups" },
+              { value: "none", label: "Global (All Rex)", searchText: "Global All Rex" },
+              ...rexGroups.map((g) => ({
+                value: String(g.id),
+                label: g.name,
+                searchText: g.name,
+              })),
+            ]}
+          />
+
+          <Select
+            aria-label="Filter users by role"
+            value={roleFilter}
+            onValueChange={setRoleFilter}
+            triggerClassName="min-w-[125px]"
+            options={[
+              { value: "all", label: "All roles" },
+              ...roles.map((r) => ({ value: String(r.id), label: r.name })),
             ]}
           />
         </div>
@@ -459,10 +526,25 @@ export default function UsersPage() {
 
       {/* Users List */}
       <section className="overflow-hidden rounded-lg border border-hairline bg-card shadow-panel">
-        <div className="flex items-center justify-between border-b border-hairline px-4 py-3">
-          <span className="font-mono text-eyebrow font-semibold uppercase text-ink-mute">
-            Operators ({fmtAmount(filteredUsers.length)})
-          </span>
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-hairline px-4 py-3">
+          <div className="flex items-center gap-2.5">
+            <span className="font-mono text-eyebrow font-semibold uppercase text-ink-mute">
+              Operators ({fmtAmount(filteredUsers.length)})
+            </span>
+            {(search || rexFilter !== "all" || roleFilter !== "all") && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearch("");
+                  setRexFilter("all");
+                  setRoleFilter("all");
+                }}
+                className="rounded border border-hairline bg-substrate px-1.5 py-0.5 font-mono text-[10px] uppercase text-ink-soft transition-colors hover:border-brass/60 hover:text-ink"
+              >
+                Clear filters
+              </button>
+            )}
+          </div>
           <span className="font-mono text-[10px] uppercase text-ink-faint">
             Shared 2FA from .env
           </span>
@@ -475,13 +557,17 @@ export default function UsersPage() {
             className="py-12"
           />
         ) : (
-          <ul className="divide-y divide-hairline">
+          <ul className="max-h-[420px] divide-y divide-hairline overflow-y-auto">
             {filteredUsers.map((u) => {
               const isSelf = currentUser?.id === u.id;
+              const isAdminRole = u.is_env_admin || u.role_name.toLowerCase() === "admin";
               return (
                 <li
                   key={u.id}
-                  className="flex flex-wrap items-center justify-between gap-3 px-4 py-3.5 transition-colors hover:bg-substrate/50"
+                  className={cn(
+                    "flex flex-wrap items-center justify-between gap-3 px-4 py-3.5 transition-colors hover:bg-substrate/50",
+                    !u.is_active && "opacity-70"
+                  )}
                 >
                   <div className="min-w-0 flex-1 space-y-1">
                     <div className="flex flex-wrap items-center gap-2">
@@ -492,13 +578,25 @@ export default function UsersPage() {
                           Root (.env)
                         </span>
                       )}
-                      <span className="rounded border border-hairline bg-substrate px-1.5 py-0.5 font-mono text-[10px] uppercase text-ink-soft">
+                      <span
+                        className={cn(
+                          "rounded border px-1.5 py-0.5 font-mono text-[10px] uppercase",
+                          isAdminRole
+                            ? "border-brass/35 bg-brass-wash/45 font-semibold text-brass-deep"
+                            : "border-hairline bg-substrate text-ink-soft"
+                        )}
+                      >
                         {u.role_name}
                       </span>
                       <span className="inline-flex items-center gap-1 rounded border border-hairline bg-card px-1.5 py-0.5 font-mono text-[10px] uppercase text-ink-mute">
                         <Layers className="h-3 w-3 text-brass" />
                         {u.rex_name ?? "All Rex"}
                       </span>
+                      {!u.is_active && (
+                        <span className="rounded border border-alert/35 bg-alert-wash/50 px-1.5 py-0.5 font-mono text-[9.5px] uppercase text-alert-deep">
+                          Disabled
+                        </span>
+                      )}
                     </div>
                   </div>
 
@@ -569,49 +667,136 @@ export default function UsersPage() {
 
       {/* Rex Categories Overview */}
       <section className="rounded-lg border border-hairline bg-card shadow-panel overflow-hidden">
-        <div className="flex items-center justify-between border-b border-hairline px-4 py-3">
-          <span className="font-mono text-eyebrow font-semibold uppercase text-ink-mute">
-            Rex Categories ({fmtAmount(rexGroups.length)})
-          </span>
-          <span className="font-mono text-[10px] uppercase text-ink-faint">
-            Names must be unique
-          </span>
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-hairline px-4 py-3">
+          <div className="flex items-center gap-2.5">
+            <span className="font-mono text-eyebrow font-semibold uppercase text-ink-mute">
+              Rex Categories ({fmtAmount(filteredRexGroups.length)}
+              {filteredRexGroups.length !== rexGroups.length ? ` / ${fmtAmount(rexGroups.length)}` : ""})
+            </span>
+            <span className="hidden sm:inline font-mono text-[10px] uppercase text-ink-faint">
+              · Delete requires 0 users &amp; 0 SIMs
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2.5">
+            {rexGroups.length > 0 && (
+              <div className="relative w-40 sm:w-48">
+                <Search className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-ink-faint" />
+                <input
+                  type="text"
+                  value={rexSearch}
+                  onChange={(e) => setRexSearch(e.target.value)}
+                  placeholder="Search Rex..."
+                  aria-label="Search Rex categories"
+                  className="h-7 w-full rounded border border-hairline bg-substrate/70 pl-7 pr-6 font-mono text-[11px] text-ink placeholder:text-ink-faint focus:border-brass focus:bg-card focus:outline-none focus:ring-1 focus:ring-brass"
+                />
+                {rexSearch && (
+                  <button
+                    type="button"
+                    onClick={() => setRexSearch("")}
+                    aria-label="Clear Rex search"
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2 text-ink-faint hover:text-ink"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                )}
+              </div>
+            )}
+            <span className="hidden md:inline font-mono text-[10px] uppercase text-ink-faint">
+              Names must be unique
+            </span>
+          </div>
         </div>
 
         {rexGroups.length === 0 ? (
           <div className="px-4 py-8 text-center text-xs text-ink-mute">
             No Rex categories yet. Creating your first Staff user will create one automatically.
           </div>
+        ) : filteredRexGroups.length === 0 ? (
+          <div className="px-4 py-8 text-center text-xs text-ink-mute">
+            No Rex categories match &ldquo;{rexSearch.trim()}&rdquo;.
+          </div>
         ) : (
-          <div className="grid gap-px bg-hairline sm:grid-cols-2 lg:grid-cols-3">
-            {rexGroups.map((g) => (
-              <div
-                key={g.id}
-                className="flex items-center justify-between gap-3 bg-card px-4 py-3"
-              >
-                <div className="min-w-0">
-                  <div className="truncate font-mono text-xs font-semibold uppercase text-ink">
-                    {g.name}
-                  </div>
-                  <div className="mt-0.5 font-mono text-[11px] tnum text-ink-mute">
-                    {fmtAmount(g.active_sim_count ?? 0)}/{fmtAmount(g.sim_count ?? 0)} SIMs ·{" "}
-                    {fmtAmount(g.user_count ?? 0)} {g.user_count === 1 ? "user" : "users"}
+          <div className="max-h-[300px] overflow-y-auto">
+            <div className="grid gap-px bg-hairline sm:grid-cols-2 lg:grid-cols-3">
+            {filteredRexGroups.map((g) => {
+              const userCount = g.user_count ?? 0;
+              const simCount = g.sim_count ?? 0;
+              const canDelete = userCount === 0 && simCount === 0;
+              const isFiltered = rexFilter === String(g.id);
+              const deleteTitle = canDelete
+                ? `Delete ${g.name}`
+                : `Cannot delete ${g.name}: requires 0 users and 0 SIMs (has ${userCount} user${userCount === 1 ? "" : "s"}, ${simCount} SIM${simCount === 1 ? "" : "s"})`;
+
+              return (
+                <div
+                  key={g.id}
+                  className={cn(
+                    "flex items-center justify-between gap-2 px-4 py-3 transition-colors",
+                    isFiltered ? "bg-brass-wash/35" : "bg-card hover:bg-substrate/40"
+                  )}
+                >
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setRexFilter((prev) => (prev === String(g.id) ? "all" : String(g.id)))
+                    }
+                    title={isFiltered ? "Click to show all operators" : `Filter operators by ${g.name}`}
+                    className="min-w-0 flex-1 text-left focus:outline-none"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <span
+                        className={cn(
+                          "truncate font-mono text-xs font-semibold uppercase",
+                          isFiltered ? "text-brass-deep" : "text-ink"
+                        )}
+                      >
+                        {g.name}
+                      </span>
+                      {isFiltered && (
+                        <span className="rounded border border-brass/40 bg-brass-wash px-1 py-px font-mono text-[9px] uppercase text-brass-deep">
+                          Filtered
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-0.5 font-mono text-[11px] tnum text-ink-mute">
+                      {fmtAmount(g.active_sim_count ?? 0)}/{fmtAmount(simCount)} SIMs ·{" "}
+                      {fmtAmount(userCount)} {userCount === 1 ? "user" : "users"}
+                    </div>
+                  </button>
+                  <div className="flex shrink-0 items-center gap-0.5">
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      onClick={() => {
+                        setEditingRex(g);
+                        setRexInputName(g.name);
+                        setRexDialogOpen(true);
+                      }}
+                      title={`Rename ${g.name}`}
+                    >
+                      <Edit3 className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      disabled={!canDelete}
+                      onClick={() => setDeleteRex(g)}
+                      title={deleteTitle}
+                      aria-label={deleteTitle}
+                      className={
+                        canDelete
+                          ? "text-ink-mute hover:text-alert-deep"
+                          : "cursor-not-allowed text-ink-faint opacity-35"
+                      }
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
                   </div>
                 </div>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  onClick={() => {
-                    setEditingRex(g);
-                    setRexInputName(g.name);
-                    setRexDialogOpen(true);
-                  }}
-                  title={`Rename ${g.name}`}
-                >
-                  <Edit3 className="h-3.5 w-3.5" />
-                </Button>
-              </div>
-            ))}
+              );
+            })}
+            </div>
           </div>
         )}
       </section>
@@ -745,10 +930,13 @@ export default function UsersPage() {
                   aria-label="Select existing Rex category"
                   value={existingRexId}
                   onValueChange={setExistingRexId}
+                  searchable
+                  searchPlaceholder="Search Rex…"
                   className="w-full"
                   options={rexGroups.map((g) => ({
                     value: String(g.id),
                     label: `${g.name} (${g.sim_count ?? 0} SIMs)`,
+                    searchText: g.name,
                   }))}
                 />
               )}
@@ -802,7 +990,13 @@ export default function UsersPage() {
               <Select
                 aria-label="Edit Role"
                 value={editRoleId}
-                onValueChange={setEditRoleId}
+                onValueChange={(nextRoleId) => {
+                  setEditRoleId(nextRoleId);
+                  const nextRole = roles.find((r) => String(r.id) === nextRoleId);
+                  if (nextRole && !nextRole.permissions.rex.viewAll && editRexMode === "none") {
+                    setEditRexMode(rexGroups.length > 0 ? "existing" : "new");
+                  }
+                }}
                 className="w-full"
                 options={roles.map((r) => ({ value: String(r.id), label: r.name }))}
               />
@@ -832,8 +1026,14 @@ export default function UsersPage() {
                   aria-label="Existing Rex"
                   value={editRexId}
                   onValueChange={setEditRexId}
+                  searchable
+                  searchPlaceholder="Search Rex…"
                   className="w-full"
-                  options={rexGroups.map((g) => ({ value: String(g.id), label: g.name }))}
+                  options={rexGroups.map((g) => ({
+                    value: String(g.id),
+                    label: g.name,
+                    searchText: g.name,
+                  }))}
                 />
               ) : editRexMode === "new" ? (
                 <Input
@@ -841,6 +1041,11 @@ export default function UsersPage() {
                   onChange={(e) => setEditRexName(e.target.value)}
                   placeholder="New unique Rex name"
                   className="font-mono"
+                  error={
+                    duplicateEditRexName
+                      ? `"${duplicateEditRexName.name}" already exists — pick a unique name or switch to Existing.`
+                      : undefined
+                  }
                 />
               ) : (
                 <p className="text-xs text-ink-mute">Global Admin access across all Rex categories.</p>
@@ -851,7 +1056,16 @@ export default function UsersPage() {
               <Button type="button" variant="ghost" onClick={() => setEditUser(null)} disabled={saving}>
                 Cancel
               </Button>
-              <Button type="submit" loading={saving}>
+              <Button
+                type="submit"
+                loading={saving}
+                disabled={
+                  !editUsername.trim() ||
+                  (editRexMode === "existing" && !editRexId) ||
+                  (editRexMode === "new" &&
+                    (!editRexName.trim() || Boolean(duplicateEditRexName)))
+                }
+              >
                 Save Changes
               </Button>
             </DialogFooter>
@@ -1027,6 +1241,27 @@ export default function UsersPage() {
         </DialogContent>
       </Dialog>
 
+      {/* Delete Rex Confirmation */}
+      <Dialog open={!!deleteRex} onOpenChange={(o) => !o && setDeleteRex(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Delete Rex category {deleteRex?.name}?</DialogTitle>
+            <DialogDescription>
+              This Rex category has 0 users and 0 SIMs. Deleting it permanently removes the category
+              while preserving any historical transfer logs.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setDeleteRex(null)} disabled={saving}>
+              Cancel
+            </Button>
+            <Button variant="destructive" loading={saving} onClick={handleDeleteRex}>
+              Delete Rex
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Create / Rename Rex Modal */}
       <Dialog open={rexDialogOpen} onOpenChange={setRexDialogOpen}>
         <DialogContent className="max-w-sm">
@@ -1043,12 +1278,21 @@ export default function UsersPage() {
               onChange={(e) => setRexInputName(e.target.value)}
               placeholder="Rex-1"
               className="font-mono"
+              error={
+                duplicateModalRexName
+                  ? `"${duplicateModalRexName.name}" already exists — names must be unique.`
+                  : undefined
+              }
             />
             <DialogFooter>
               <Button type="button" variant="ghost" onClick={() => setRexDialogOpen(false)} disabled={saving}>
                 Cancel
               </Button>
-              <Button type="submit" loading={saving} disabled={rexInputName.trim().length < 2}>
+              <Button
+                type="submit"
+                loading={saving}
+                disabled={rexInputName.trim().length < 2 || Boolean(duplicateModalRexName)}
+              >
                 {editingRex ? "Rename" : "Create"}
               </Button>
             </DialogFooter>

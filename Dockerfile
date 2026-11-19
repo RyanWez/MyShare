@@ -19,6 +19,7 @@ FROM node:22-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
+ENV NODE_OPTIONS="--max-old-space-size=384"
 ENV PORT=3100
 ENV HOSTNAME=0.0.0.0
 # The DB buckets transfers by *local* time — keep the server on the operator's

@@ -19,9 +19,9 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { StatusDot } from "@/components/ui/StatusDot";
-import { useLiveStatus, type LiveStatus } from "@/lib/liveEvents";
+import { useLive, useLiveStatus, type LiveStatus } from "@/lib/liveEvents";
 import { useSession } from "@/components/SessionProvider";
-import { fetchSimsPage, fetchStats } from "@/lib/api";
+import { fetchFleetCounts, invalidateCache } from "@/lib/api";
 
 const liveLed: Record<LiveStatus, { tone: "signal" | "alert" | "muted"; pulse?: boolean; title: string }> = {
   online: { tone: "signal", title: "Live — connected" },
@@ -139,30 +139,26 @@ export default function Sidebar({ open, onClose, collapsed = false, onToggleColl
     return () => ro.disconnect();
   }, [measureMarker]);
 
+  const canReadFleet = permissions.overview.view || permissions.sims.view || permissions.transfer.view;
+
+  const loadFleet = React.useCallback(
+    (bypass = false) => {
+      if (!user || !canReadFleet) return;
+      fetchFleetCounts({ rexId: rexFilter, bypassCache: bypass, noDelay: true })
+        .then((d) => setFleet({ total: d.total, active: d.active }))
+        .catch(() => {});
+    },
+    [user, canReadFleet, rexFilter]
+  );
+
   React.useEffect(() => {
-    if (!user) return;
-    let alive = true;
-    if (permissions.overview.view) {
-      fetchStats(undefined, undefined, { rexId: rexFilter })
-        .then((d) => {
-          if (alive && d?.stats) {
-            setFleet({ total: d.stats.simCount, active: d.stats.loggedIn });
-          }
-        })
-        .catch(() => {});
-    } else if (permissions.sims.view) {
-      fetchSimsPage({ page: 1, pageSize: 1, rexId: rexFilter })
-        .then((d) => {
-          if (alive && d?.counts) {
-            setFleet({ total: d.counts.all, active: d.counts.active });
-          }
-        })
-        .catch(() => {});
-    }
-    return () => {
-      alive = false;
-    };
-  }, [pathname, user, permissions, rexFilter]);
+    loadFleet();
+  }, [loadFleet]);
+
+  useLive(() => {
+    invalidateCache("fleet");
+    loadFleet(true);
+  });
 
   return (
     <>

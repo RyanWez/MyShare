@@ -49,9 +49,21 @@ export async function GET(req: NextRequest) {
     });
   }
 
-  // Unpaged mode (used by Transfer sender picker, optionally filtered to active)
+  // Unpaged mode (used by Transfer sender picker, active-first with optional search & limit)
   const statusFilter = q.get("status") || undefined;
-  const simsRaw = await dbApi.listSimsPublic({ rexId, status: statusFilter, limit: 2000 });
+  const searchQuery = q.get("q")?.trim() || undefined;
+  const rawLimit = Number(q.get("limit"));
+  const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(2000, Math.floor(rawLimit)) : 48;
+  const includePhoneRaw = !searchQuery ? q.get("includePhone")?.trim() : undefined;
+  const includePhone = includePhoneRaw ? normalizeMsisdn(includePhoneRaw) : undefined;
+
+  const { sims: simsRaw, total, activeTotal } = await dbApi.listSimsPublic({
+    rexId,
+    status: statusFilter,
+    q: searchQuery,
+    includePhone,
+    limit,
+  });
   const phones = simsRaw.map((s) => s.phone);
   const [volumeToday, volumeThisMonth] =
     phones.length > 0
@@ -66,7 +78,7 @@ export async function GET(req: NextRequest) {
     volume_today: volumeToday[s.phone] ?? 0,
     volume_this_month: volumeThisMonth[s.phone] ?? 0,
   }));
-  return NextResponse.json({ ok: true, sims, total: sims.length });
+  return NextResponse.json({ ok: true, sims, total, activeTotal });
 }
 
 export async function PATCH(req: NextRequest) {

@@ -146,3 +146,96 @@ export function statusBadge(status: string): { label: string; tone: Tone } {
       return { label: status, tone: "muted" };
   }
 }
+
+const NATURAL_COLLATOR = new Intl.Collator("en", {
+  numeric: true,
+  sensitivity: "base",
+});
+
+/** Natural case-insensitive comparison so "Rex-2" sorts before "Rex-12". */
+export function compareNatural(a: string, b: string): number {
+  return NATURAL_COLLATOR.compare(a, b);
+}
+
+function userRoleTier(roleName: string): number {
+  const lower = roleName.toLowerCase();
+  if (lower === "admin") return 0;
+  if (lower === "staff") return 1;
+  return 2;
+}
+
+export interface SortableOperatorUser {
+  is_env_admin: boolean;
+  role_name: string;
+  is_active: boolean;
+  rex_name: string | null;
+  username: string;
+}
+
+/**
+ * Sort operators with Root (.env) and Admin roles pinned at the top, followed
+ * by Staff and custom roles below (active first, then natural Rex & username).
+ */
+export function compareOperatorUsers(a: SortableOperatorUser, b: SortableOperatorUser): number {
+  if (a.is_env_admin !== b.is_env_admin) return a.is_env_admin ? -1 : 1;
+  const tierA = userRoleTier(a.role_name);
+  const tierB = userRoleTier(b.role_name);
+  if (tierA !== tierB) return tierA - tierB;
+  if (tierA === 2) {
+    const roleCmp = compareNatural(a.role_name, b.role_name);
+    if (roleCmp !== 0) return roleCmp;
+  }
+  if (a.is_active !== b.is_active) return a.is_active ? -1 : 1;
+  const rexA = a.rex_name ?? "";
+  const rexB = b.rex_name ?? "";
+  if ((rexA === "") !== (rexB === "")) return rexA === "" ? -1 : 1;
+  const rexCmp = compareNatural(rexA, rexB);
+  if (rexCmp !== 0) return rexCmp;
+  return compareNatural(a.username, b.username);
+}
+
+const MM_OFFSET_MS = (6 * 60 + 30) * 60 * 1000;
+
+function validIsoDate(year: number, month: number, day: number): string | null {
+  if (year < 1970 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31) {
+    return null;
+  }
+  const d = new Date(Date.UTC(year, month - 1, day));
+  if (
+    d.getUTCFullYear() !== year ||
+    d.getUTCMonth() !== month - 1 ||
+    d.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+/**
+ * Parse Mytel's `billExpireAt` string into an ISO `YYYY-MM-DD` date (Asia/Yangon)
+ * for indexed PostgreSQL `DATE` storage & expiry queries.
+ */
+export function parseBillExpireDate(raw: string | null | undefined): string | null {
+  const s = raw?.trim();
+  if (!s) return null;
+
+  let m = s.match(/^(0[1-9]|[12][0-9]|3[01])\/(0[1-9]|1[0-2])\/([0-9]{4})/);
+  if (m) return validIsoDate(Number(m[3]), Number(m[2]), Number(m[1]));
+
+  m = s.match(/^(0[1-9]|[12][0-9]|3[01])-(0[1-9]|1[0-2])-([0-9]{4})/);
+  if (m) return validIsoDate(Number(m[3]), Number(m[2]), Number(m[1]));
+
+  m = s.match(/^([0-9]{4})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])/);
+  if (m) return validIsoDate(Number(m[1]), Number(m[2]), Number(m[3]));
+
+  if (/^[0-9]{13}$/.test(s)) {
+    const d = new Date(Number(s) + MM_OFFSET_MS);
+    return validIsoDate(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate());
+  }
+  if (/^[0-9]{10}$/.test(s)) {
+    const d = new Date(Number(s) * 1000 + MM_OFFSET_MS);
+    return validIsoDate(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate());
+  }
+
+  return null;
+}

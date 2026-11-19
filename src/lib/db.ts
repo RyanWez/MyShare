@@ -1,6 +1,6 @@
 import { query, withTransaction } from "./pg";
 import { sse } from "./events";
-import { phoneSearchKeys } from "./format";
+import { compareNatural, compareOperatorUsers, parseBillExpireDate, phoneSearchKeys } from "./format";
 import { decryptSecret, encryptSecret } from "./crypto";
 import { LOW_BALANCE_THRESHOLD } from "./constants";
 import { normalizePermissions, type RolePermissions } from "./permissions";
@@ -119,7 +119,7 @@ export interface ReceiverGroup {
   totalFee: number;
   successCount: number;
   lastAt: number;
-  transfers: TransferRow[];
+  transfers?: TransferRow[];
 }
 
 const TRANSFER_COLUMNS =
@@ -133,29 +133,42 @@ const PUBLIC_SIM_COLUMNS =
   "s.balance_checked_at, s.bill_expire_at, s.block_one_way, s.block_two_way, s.sim_status_text, " +
   "s.status, s.note, s.created_at, s.updated_at";
 
-const PARSED_EXPIRY_DATE_SQL = `
-  CASE
-    WHEN NULLIF(BTRIM(s.bill_expire_at), '') IS NULL THEN NULL
-    WHEN BTRIM(s.bill_expire_at) ~ '^(0[1-9]|[12][0-9]|3[01])/(0[1-9]|1[0-2])/[0-9]{4}' THEN
-      TO_DATE(SUBSTRING(BTRIM(s.bill_expire_at) FROM 1 FOR 10), 'DD/MM/YYYY')
-    WHEN BTRIM(s.bill_expire_at) ~ '^(0[1-9]|[12][0-9]|3[01])-(0[1-9]|1[0-2])-[0-9]{4}' THEN
-      TO_DATE(SUBSTRING(BTRIM(s.bill_expire_at) FROM 1 FOR 10), 'DD-MM-YYYY')
-    WHEN BTRIM(s.bill_expire_at) ~ '^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])' THEN
-      TO_DATE(SUBSTRING(BTRIM(s.bill_expire_at) FROM 1 FOR 10), 'YYYY-MM-DD')
-    WHEN BTRIM(s.bill_expire_at) ~ '^[0-9]{13}$' THEN
-      (TO_TIMESTAMP(BTRIM(s.bill_expire_at)::bigint / 1000.0) AT TIME ZONE 'Asia/Yangon')::date
-    WHEN BTRIM(s.bill_expire_at) ~ '^[0-9]{10}$' THEN
-      (TO_TIMESTAMP(BTRIM(s.bill_expire_at)::bigint) AT TIME ZONE 'Asia/Yangon')::date
-    ELSE NULL
-  END
-`;
-
 const TODAY_MM_SQL = `(NOW() AT TIME ZONE 'Asia/Yangon')::date`;
 const EXPIRING_SOON_DAYS = 10;
 
 const ENCRYPTED_SIM_COLUMNS = ["access_token", "refresh_token"] as const;
-const RECEIVER_ROW_CAP = 200_000;
+const RECEIVER_GROUP_CAP = 10_000;
+const RECEIVER_DETAIL_CAP = 1_000;
 const MM_OFFSET_SEC = 6 * 3600 + 30 * 60; // Asia/Yangon UTC+06:30 (no DST)
+
+const SESSION_CACHE_TTL_MS = 10_000;
+const SESSION_CACHE_MAX = 256;
+const REX_CACHE_TTL_MS = 3_000;
+
+const globalDbCache = globalThis as unknown as {
+  __myshareSessionCache?: Map<number, { row: UserAuthRow | null; exp: number }>;
+  __myshareRexCache?: { rows: RexGroupRow[]; exp: number } | null;
+};
+
+function sessionCacheMap() {
+  if (!globalDbCache.__myshareSessionCache) {
+    globalDbCache.__myshareSessionCache = new Map();
+  }
+  return globalDbCache.__myshareSessionCache;
+}
+
+function invalidateSessionCache(userId?: number) {
+  const cache = sessionCacheMap();
+  if (userId !== undefined) {
+    cache.delete(userId);
+  } else {
+    cache.clear();
+  }
+}
+
+function invalidateRexCache() {
+  globalDbCache.__myshareRexCache = null;
+}
 
 const now = () => Math.floor(Date.now() / 1000);
 
@@ -280,6 +293,13 @@ export const dbApi = {
   },
 
   async getUserSessionById(userId: number): Promise<UserAuthRow | undefined> {
+    const cache = sessionCacheMap();
+    const nowMs = Date.now();
+    const hit = cache.get(userId);
+    if (hit && hit.exp > nowMs) {
+      return hit.row ?? undefined;
+    }
+
     const res = await query(
       `SELECT u.*, r.name AS role_name, r.permissions, rg.name AS rex_name
        FROM users u
@@ -289,8 +309,13 @@ export const dbApi = {
        LIMIT 1`,
       [userId]
     );
-    if (!res.rows[0]) return undefined;
-    return mapUserRow(res.rows[0]);
+    const mapped = res.rows[0] ? mapUserRow(res.rows[0]) : null;
+    if (cache.size >= SESSION_CACHE_MAX) {
+      const oldestKey = cache.keys().next().value;
+      if (oldestKey !== undefined) cache.delete(oldestKey);
+    }
+    cache.set(userId, { row: mapped, exp: nowMs + SESSION_CACHE_TTL_MS });
+    return mapped ?? undefined;
   },
 
   async listUsers(): Promise<UserRow[]> {
@@ -300,9 +325,9 @@ export const dbApi = {
        FROM users u
        JOIN roles r ON r.id = u.role_id
        LEFT JOIN rex_groups rg ON rg.id = u.rex_id
-       ORDER BY u.is_env_admin DESC, u.created_at DESC, u.id DESC`
+       ORDER BY u.is_env_admin DESC, u.id ASC`
     );
-    return res.rows.map((r) => ({
+    const rows = res.rows.map((r) => ({
       id: Number(r.id),
       username: String(r.username),
       role_id: Number(r.role_id),
@@ -315,6 +340,8 @@ export const dbApi = {
       created_at: Number(r.created_at),
       updated_at: Number(r.updated_at),
     }));
+    rows.sort(compareOperatorUsers);
+    return rows;
   },
 
   async createUser(input: {
@@ -331,6 +358,8 @@ export const dbApi = {
        RETURNING id`,
       [cleanName, cleanName.toLowerCase(), input.passwordHash, input.roleId, input.rexId, ts]
     );
+    invalidateRexCache();
+    invalidateSessionCache(res.rows[0].id);
     const created = await this.getUserSessionById(res.rows[0].id);
     return created!;
   },
@@ -378,12 +407,19 @@ export const dbApi = {
     sets.push(`updated_at = ${push(now())}`);
     const idParam = push(id);
     await query(`UPDATE users SET ${sets.join(", ")} WHERE id = ${idParam}`, args);
+    invalidateSessionCache(id);
+    invalidateRexCache();
     return this.getUserSessionById(id);
   },
 
   async deleteUser(id: number): Promise<boolean> {
     const res = await query(`DELETE FROM users WHERE id = $1 AND is_env_admin = FALSE`, [id]);
-    return (res.rowCount ?? 0) > 0;
+    const deleted = (res.rowCount ?? 0) > 0;
+    if (deleted) {
+      invalidateSessionCache(id);
+      invalidateRexCache();
+    }
+    return deleted;
   },
 
   async listRoles(): Promise<RoleRow[]> {
@@ -458,6 +494,7 @@ export const dbApi = {
     sets.push(`updated_at = ${push(now())}`);
     const idParam = push(id);
     await query(`UPDATE roles SET ${sets.join(", ")} WHERE id = ${idParam}`, args);
+    invalidateSessionCache();
     return this.getRoleById(id);
   },
 
@@ -470,22 +507,42 @@ export const dbApi = {
       return { deleted: false, reason: "Role is currently assigned to users" };
     }
     await query(`DELETE FROM roles WHERE id = $1`, [id]);
+    invalidateSessionCache();
     return { deleted: true };
   },
 
   async listRexGroups(): Promise<RexGroupRow[]> {
+    const cached = globalDbCache.__myshareRexCache;
+    const nowMs = Date.now();
+    if (cached && cached.exp > nowMs) {
+      return cached.rows.map((r) => ({ ...r }));
+    }
+
     const res = await query(
-      `SELECT rg.id, rg.name, rg.created_at,
-              COUNT(DISTINCT s.id)::int AS sim_count,
-              COUNT(DISTINCT CASE WHEN s.status = 'active' THEN s.id END)::int AS active_sim_count,
-              COUNT(DISTINCT u.id)::int AS user_count
+      `WITH sim_agg AS (
+         SELECT rex_id,
+                COUNT(*)::int AS sim_count,
+                COUNT(*) FILTER (WHERE status = 'active')::int AS active_sim_count
+         FROM sims
+         WHERE rex_id IS NOT NULL
+         GROUP BY rex_id
+       ),
+       user_agg AS (
+         SELECT rex_id, COUNT(*)::int AS user_count
+         FROM users
+         WHERE rex_id IS NOT NULL
+         GROUP BY rex_id
+       )
+       SELECT rg.id, rg.name, rg.created_at,
+              COALESCE(sa.sim_count, 0)::int AS sim_count,
+              COALESCE(sa.active_sim_count, 0)::int AS active_sim_count,
+              COALESCE(ua.user_count, 0)::int AS user_count
        FROM rex_groups rg
-       LEFT JOIN sims s ON s.rex_id = rg.id
-       LEFT JOIN users u ON u.rex_id = rg.id
-       GROUP BY rg.id
-       ORDER BY rg.name_lower ASC`
+       LEFT JOIN sim_agg sa ON sa.rex_id = rg.id
+       LEFT JOIN user_agg ua ON ua.rex_id = rg.id
+       ORDER BY rg.id ASC`
     );
-    return res.rows.map((r) => ({
+    const rows = res.rows.map((r) => ({
       id: Number(r.id),
       name: String(r.name),
       created_at: Number(r.created_at),
@@ -493,6 +550,9 @@ export const dbApi = {
       active_sim_count: Number(r.active_sim_count ?? 0),
       user_count: Number(r.user_count ?? 0),
     }));
+    rows.sort((a, b) => compareNatural(a.name, b.name));
+    globalDbCache.__myshareRexCache = { rows, exp: nowMs + REX_CACHE_TTL_MS };
+    return rows.map((r) => ({ ...r }));
   },
 
   async getRexGroupById(id: number): Promise<RexGroupRow | undefined> {
@@ -517,6 +577,7 @@ export const dbApi = {
        RETURNING id, name, created_at`,
       [clean, clean.toLowerCase(), now()]
     );
+    invalidateRexCache();
     return res.rows[0];
   },
 
@@ -526,7 +587,46 @@ export const dbApi = {
       `UPDATE rex_groups SET name = $1, name_lower = $2 WHERE id = $3 RETURNING id, name, created_at`,
       [clean, clean.toLowerCase(), id]
     );
+    invalidateRexCache();
+    invalidateSessionCache();
     return res.rows[0];
+  },
+
+  async deleteRexGroup(
+    id: number
+  ): Promise<{ deleted: boolean; status?: number; reason?: string; name?: string }> {
+    const result = await withTransaction(async (client) => {
+      const rowRes = await client.query<{ id: number; name: string }>(
+        `SELECT id, name FROM rex_groups WHERE id = $1 FOR UPDATE`,
+        [id]
+      );
+      const rex = rowRes.rows[0];
+      if (!rex) {
+        return { deleted: false, status: 404, reason: "Rex category not found" };
+      }
+
+      const counts = await client.query<{ users: number; sims: number }>(
+        `SELECT
+           (SELECT COUNT(*)::int FROM users WHERE rex_id = $1) AS users,
+           (SELECT COUNT(*)::int FROM sims WHERE rex_id = $1) AS sims`,
+        [id]
+      );
+      const { users, sims } = counts.rows[0];
+      if (users > 0 || sims > 0) {
+        return {
+          deleted: false,
+          status: 409,
+          reason: `Cannot delete "${rex.name}": ${users} user(s) and ${sims} SIM(s) are still assigned`,
+        };
+      }
+
+      await client.query(`DELETE FROM rex_groups WHERE id = $1`, [id]);
+      return { deleted: true, name: rex.name };
+    });
+    if (result.deleted) {
+      invalidateRexCache();
+    }
+    return result;
   },
 
   async addAuditLog(entry: {
@@ -566,29 +666,108 @@ export const dbApi = {
     return res.rows[0];
   },
 
-  async listSimsPublic(opts?: { rexId?: number | null; status?: string; limit?: number }): Promise<PublicSimRow[]> {
-    const clauses: string[] = [];
+  async fleetCounts(rexId?: number | null): Promise<{ total: number; active: number }> {
     const args: unknown[] = [];
-    if (opts?.rexId !== undefined && opts.rexId !== null) {
-      args.push(opts.rexId);
-      clauses.push(`s.rex_id = $${args.length}`);
-    }
-    if (opts?.status) {
-      args.push(opts.status);
-      clauses.push(`s.status = $${args.length}`);
-    }
-    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
-    const limitSql = opts?.limit ? `LIMIT ${Math.max(1, Math.min(5000, opts.limit))}` : "";
-    const res = await query<PublicSimRow>(
-      `SELECT ${PUBLIC_SIM_COLUMNS}
-       FROM sims s
-       LEFT JOIN rex_groups rg ON rg.id = s.rex_id
-       ${where}
-       ORDER BY s.updated_at DESC
-       ${limitSql}`,
+    const where = rexId !== undefined && rexId !== null ? `WHERE rex_id = $1` : "";
+    if (rexId !== undefined && rexId !== null) args.push(rexId);
+    const res = await query<{ total: number; active: number }>(
+      `SELECT
+         COUNT(*)::int AS total,
+         COUNT(*) FILTER (WHERE status = 'active')::int AS active
+       FROM sims
+       ${where}`,
       args
     );
-    return res.rows;
+    const row = res.rows[0];
+    return { total: Number(row?.total ?? 0), active: Number(row?.active ?? 0) };
+  },
+
+  async listSimsPublic(opts?: {
+    rexId?: number | null;
+    status?: string;
+    q?: string;
+    includePhone?: string;
+    limit?: number;
+  }): Promise<{ sims: PublicSimRow[]; total: number; activeTotal: number }> {
+    const scopeClauses: string[] = [];
+    const scopeArgs: unknown[] = [];
+    if (opts?.rexId !== undefined && opts.rexId !== null) {
+      scopeArgs.push(opts.rexId);
+      scopeClauses.push(`s.rex_id = $${scopeArgs.length}`);
+    }
+    const scopeWhere = scopeClauses.length ? `WHERE ${scopeClauses.join(" AND ")}` : "";
+
+    const clauses = [...scopeClauses];
+    const args = [...scopeArgs];
+    const push = (v: unknown) => {
+      args.push(v);
+      return `$${args.length}`;
+    };
+
+    if (opts?.status) {
+      clauses.push(`s.status = ${push(opts.status)}`);
+    }
+
+    const searchRaw = opts?.q?.trim();
+    if (searchRaw) {
+      const ors: string[] = [
+        `LOWER(COALESCE(s.note, '')) LIKE ${push(likePattern(searchRaw.toLowerCase()))} ESCAPE '\\'`,
+      ];
+      for (const key of phoneSearchKeys(searchRaw)) {
+        ors.push(`s.phone LIKE ${push(likePattern(key))} ESCAPE '\\'`);
+      }
+      clauses.push(`(${ors.join(" OR ")})`);
+    }
+
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    const limitVal = Math.max(1, Math.min(2000, opts?.limit ?? 48));
+    const limitParam = push(limitVal);
+
+    const [rowsRes, countRes, activeRes] = await Promise.all([
+      query<PublicSimRow>(
+        `SELECT ${PUBLIC_SIM_COLUMNS}
+         FROM sims s
+         LEFT JOIN rex_groups rg ON rg.id = s.rex_id
+         ${where}
+         ORDER BY CASE WHEN s.status = 'active' THEN 0 ELSE 1 END ASC, s.updated_at DESC, s.id DESC
+         LIMIT ${limitParam}`,
+        args
+      ),
+      query<{ c: number }>(
+        `SELECT COUNT(*)::int AS c FROM sims s ${where}`,
+        args.slice(0, args.length - 1)
+      ),
+      query<{ c: number }>(
+        `SELECT COUNT(*)::int AS c FROM sims s ${scopeWhere ? `${scopeWhere} AND s.status = 'active'` : `WHERE s.status = 'active'`}`,
+        scopeArgs
+      ),
+    ]);
+
+    const sims = rowsRes.rows;
+    const includePhone = opts?.includePhone?.trim();
+    if (includePhone && !sims.some((s) => s.phone === includePhone)) {
+      const incArgs: unknown[] = [includePhone];
+      const incRexClause =
+        opts?.rexId !== undefined && opts.rexId !== null ? `AND s.rex_id = $2` : "";
+      if (opts?.rexId !== undefined && opts.rexId !== null) incArgs.push(opts.rexId);
+      const incRes = await query<PublicSimRow>(
+        `SELECT ${PUBLIC_SIM_COLUMNS}
+         FROM sims s
+         LEFT JOIN rex_groups rg ON rg.id = s.rex_id
+         WHERE s.phone = $1 ${incRexClause}
+         LIMIT 1`,
+        incArgs
+      );
+      if (incRes.rows[0]) {
+        sims.unshift(incRes.rows[0]);
+      }
+    }
+
+    return {
+      sims,
+      total: countRes.rows[0]?.c ?? sims.length,
+      activeTotal: activeRes.rows[0]?.c ?? 0,
+    };
   },
 
   async listSimsPaged(q: SimsPagedQuery): Promise<{
@@ -621,19 +800,15 @@ export const dbApi = {
       expiring: number;
       expired: number;
     }>(
-      `WITH scoped AS (
-         SELECT s.status, s.balance, (${PARSED_EXPIRY_DATE_SQL}) AS exp_date
-         FROM sims s
-         ${scopeWhere}
-       )
-       SELECT
+      `SELECT
          COUNT(*)::int AS all,
-         COUNT(*) FILTER (WHERE status = 'active')::int AS active,
-         COUNT(*) FILTER (WHERE status <> 'active')::int AS inactive,
-         COUNT(*) FILTER (WHERE status = 'active' AND balance IS NOT NULL AND balance < $${lowParamIdx})::int AS drained,
-         COUNT(*) FILTER (WHERE exp_date IS NOT NULL AND exp_date > ${TODAY_MM_SQL} AND (exp_date - ${TODAY_MM_SQL}) <= $${daysParamIdx})::int AS expiring,
-         COUNT(*) FILTER (WHERE exp_date IS NOT NULL AND exp_date <= ${TODAY_MM_SQL})::int AS expired
-       FROM scoped`,
+         COUNT(*) FILTER (WHERE s.status = 'active')::int AS active,
+         COUNT(*) FILTER (WHERE s.status <> 'active')::int AS inactive,
+         COUNT(*) FILTER (WHERE s.status = 'active' AND s.balance IS NOT NULL AND s.balance < $${lowParamIdx})::int AS drained,
+         COUNT(*) FILTER (WHERE s.bill_expire_date IS NOT NULL AND s.bill_expire_date > ${TODAY_MM_SQL} AND (s.bill_expire_date - ${TODAY_MM_SQL}) <= $${daysParamIdx})::int AS expiring,
+         COUNT(*) FILTER (WHERE s.bill_expire_date IS NOT NULL AND s.bill_expire_date <= ${TODAY_MM_SQL})::int AS expired
+       FROM sims s
+       ${scopeWhere}`,
       [...scopeArgs, LOW_BALANCE_THRESHOLD, EXPIRING_SOON_DAYS]
     );
     const counts = countsRes.rows[0] ?? {
@@ -645,7 +820,7 @@ export const dbApi = {
       expired: 0,
     };
 
-    const clauses: string[] = [];
+    const clauses: string[] = [...scopeClauses];
     const args = [...scopeArgs];
     const push = (v: unknown) => {
       args.push(v);
@@ -659,39 +834,30 @@ export const dbApi = {
     } else if (q.view === "drained") {
       clauses.push(`s.status = 'active' AND s.balance IS NOT NULL AND s.balance < ${push(LOW_BALANCE_THRESHOLD)}`);
     } else if (q.view === "expiring") {
-      clauses.push(`s.exp_date IS NOT NULL AND s.exp_date > ${TODAY_MM_SQL} AND (s.exp_date - ${TODAY_MM_SQL}) <= ${push(EXPIRING_SOON_DAYS)}`);
+      clauses.push(`s.bill_expire_date IS NOT NULL AND s.bill_expire_date > ${TODAY_MM_SQL} AND (s.bill_expire_date - ${TODAY_MM_SQL}) <= ${push(EXPIRING_SOON_DAYS)}`);
     } else if (q.view === "expired") {
-      clauses.push(`s.exp_date IS NOT NULL AND s.exp_date <= ${TODAY_MM_SQL}`);
+      clauses.push(`s.bill_expire_date IS NOT NULL AND s.bill_expire_date <= ${TODAY_MM_SQL}`);
     }
 
     const searchRaw = q.q?.trim();
     if (searchRaw) {
-      const cleanPhone = searchRaw.toLowerCase().replace(/[\s-+]/g, "");
+      const qLower = searchRaw.toLowerCase();
       const ors: string[] = [
-        `LOWER(COALESCE(s.note, '')) LIKE ${push(likePattern(searchRaw.toLowerCase()))} ESCAPE '\\'`,
-        `LOWER(COALESCE(s.rex_name, '')) LIKE ${push(likePattern(searchRaw.toLowerCase()))} ESCAPE '\\'`,
+        `LOWER(COALESCE(s.note, '')) LIKE ${push(likePattern(qLower))} ESCAPE '\\'`,
+        `LOWER(COALESCE(rg.name, '')) LIKE ${push(likePattern(qLower))} ESCAPE '\\'`,
       ];
-      if (cleanPhone) {
-        ors.push(`REPLACE(REPLACE(LOWER(s.phone), ' ', ''), '+', '') LIKE ${push(likePattern(cleanPhone))} ESCAPE '\\'`);
+      for (const key of phoneSearchKeys(searchRaw)) {
+        ors.push(`s.phone LIKE ${push(likePattern(key))} ESCAPE '\\'`);
       }
       clauses.push(`(${ors.join(" OR ")})`);
     }
 
     const whereSql = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
 
-    const baseCte = `
-      WITH scoped AS (
-        SELECT ${PUBLIC_SIM_COLUMNS}, (${PARSED_EXPIRY_DATE_SQL}) AS exp_date
-        FROM sims s
-        LEFT JOIN rex_groups rg ON rg.id = s.rex_id
-        ${scopeWhere}
-      )
-    `;
-
     const totalRes = await query<{ c: number }>(
-      `${baseCte}
-       SELECT COUNT(*)::int AS c
-       FROM scoped s
+      `SELECT COUNT(*)::int AS c
+       FROM sims s
+       ${searchRaw ? "LEFT JOIN rex_groups rg ON rg.id = s.rex_id" : ""}
        ${whereSql}`,
       args
     );
@@ -703,19 +869,16 @@ export const dbApi = {
     } else if (q.sort === "balance-desc") {
       orderSql = "CASE WHEN s.balance IS NULL THEN 1 ELSE 0 END ASC, s.balance DESC, s.updated_at DESC";
     } else if (q.sort === "expiry-asc") {
-      orderSql = "CASE WHEN s.exp_date IS NULL THEN 1 ELSE 0 END ASC, s.exp_date ASC, s.updated_at DESC";
+      orderSql = "CASE WHEN s.bill_expire_date IS NULL THEN 1 ELSE 0 END ASC, s.bill_expire_date ASC, s.updated_at DESC";
     }
 
     const limitParam = push(q.pageSize);
     const offsetParam = push((Math.max(1, q.page) - 1) * q.pageSize);
 
     const rowsRes = await query<PublicSimRow>(
-      `${baseCte}
-       SELECT s.id, s.phone, s.rex_id, s.rex_name, s.added_by_user_id,
-              s.token_expires_at, s.refresh_expires_at, s.subscription_id, s.balance,
-              s.balance_checked_at, s.bill_expire_at, s.block_one_way, s.block_two_way, s.sim_status_text,
-              s.status, s.note, s.created_at, s.updated_at
-       FROM scoped s
+      `SELECT ${PUBLIC_SIM_COLUMNS}
+       FROM sims s
+       LEFT JOIN rex_groups rg ON rg.id = s.rex_id
        ${whereSql}
        ORDER BY ${orderSql}
        LIMIT ${limitParam} OFFSET ${offsetParam}`,
@@ -783,13 +946,16 @@ export const dbApi = {
         return `$${vals.length}`;
       };
 
-      const skipKeys = new Set(["phone", "id", "rex_name", "created_at"]);
+      const skipKeys = new Set(["phone", "id", "rex_name", "created_at", "bill_expire_date"]);
       for (const [k, v] of Object.entries(fields)) {
         if (skipKeys.has(k) || v === undefined) continue;
         const val = ENCRYPTED_SIM_COLUMNS.includes(k as (typeof ENCRYPTED_SIM_COLUMNS)[number])
           ? encryptSecret(v as string | null)
           : v;
         sets.push(`${k} = ${push(val)}`);
+      }
+      if (fields.bill_expire_at !== undefined) {
+        sets.push(`bill_expire_date = ${push(parseBillExpireDate(fields.bill_expire_at))}`);
       }
       if (sets.length > 0) {
         sets.push(`updated_at = ${push(ts)}`);
@@ -798,6 +964,7 @@ export const dbApi = {
       }
     });
 
+    invalidateRexCache();
     const updated = (await this.getSim(phone))!;
     sse.emit("update", { kind: "sync", rexId: updated.rex_id });
     return updated;
@@ -815,6 +982,7 @@ export const dbApi = {
     );
     const moved = res.rowCount ?? 0;
     if (moved > 0) {
+      invalidateRexCache();
       const notified = new Set<number | null>();
       for (const r of prevRexRes.rows) notified.add(r.rex_id);
       notified.add(targetRexId);
@@ -841,6 +1009,7 @@ export const dbApi = {
     );
     const removed = delRes.rowCount ?? 0;
     if (removed > 0) {
+      invalidateRexCache();
       for (const r of rexRes.rows) {
         sse.emit("update", { kind: "sync", rexId: r.rex_id });
       }
@@ -977,6 +1146,33 @@ export const dbApi = {
     return { rows: rowsRes.rows, total: countRes.rows[0]?.c ?? 0 };
   },
 
+  async listTransfersExportBatch(
+    f: TransfersFilter,
+    cursor: { createdAt: number; id: number } | null,
+    limit: number
+  ): Promise<TransferRow[]> {
+    const { sql, args } = transfersWhereClause(f);
+    const extraArgs = [...args];
+    let whereSql = sql;
+    if (cursor) {
+      extraArgs.push(cursor.createdAt, cursor.id);
+      const cursorClause = `(t.created_at, t.id) < ($${extraArgs.length - 1}, $${extraArgs.length})`;
+      whereSql = whereSql ? `${whereSql} AND ${cursorClause}` : `WHERE ${cursorClause}`;
+    }
+    extraArgs.push(limit);
+    const res = await query<TransferRow>(
+      `SELECT ${TRANSFER_COLUMNS}
+       FROM transfers t
+       LEFT JOIN rex_groups rg ON rg.id = t.rex_id
+       LEFT JOIN users u ON u.id = t.created_by_user_id
+       ${whereSql}
+       ORDER BY t.created_at DESC, t.id DESC
+       LIMIT $${extraArgs.length}`,
+      extraArgs
+    );
+    return res.rows;
+  },
+
   async deleteTransfer(id: number): Promise<void> {
     const row = await this.getTransferById(id);
     await query(`DELETE FROM transfers WHERE id = $1`, [id]);
@@ -1101,24 +1297,33 @@ export const dbApi = {
       baseClauses.push(`t.rex_id = $${baseArgs.length}`);
     }
 
-    const senderArgs = [...baseArgs];
-    const rowClauses = [...baseClauses];
+    const groupArgs = [...baseArgs];
+    const groupClauses = [...baseClauses];
     if (sender) {
-      senderArgs.push(sender);
-      rowClauses.push(`t.sender_phone = $${senderArgs.length}`);
+      groupArgs.push(sender);
+      groupClauses.push(`t.sender_phone = $${groupArgs.length}`);
     }
-    senderArgs.push(RECEIVER_ROW_CAP);
+    groupArgs.push(RECEIVER_GROUP_CAP);
 
-    const [rowsRes, sendersRes] = await Promise.all([
-      query<TransferRow>(
-        `SELECT ${TRANSFER_COLUMNS}
+    const [groupsRes, sendersRes] = await Promise.all([
+      query<{
+        phone: string;
+        total_amount: number;
+        total_fee: number;
+        success_count: number;
+        last_at: number;
+      }>(
+        `SELECT t.receiver_phone AS phone,
+                COALESCE(SUM(t.amount), 0)::bigint AS total_amount,
+                COALESCE(SUM(t.fee), 0)::bigint AS total_fee,
+                COUNT(*)::int AS success_count,
+                MAX(t.created_at)::bigint AS last_at
          FROM transfers t
-         LEFT JOIN rex_groups rg ON rg.id = t.rex_id
-         LEFT JOIN users u ON u.id = t.created_by_user_id
-         WHERE ${rowClauses.join(" AND ")}
-         ORDER BY t.created_at DESC, t.id DESC
-         LIMIT $${senderArgs.length}`,
-        senderArgs
+         WHERE ${groupClauses.join(" AND ")}
+         GROUP BY t.receiver_phone
+         ORDER BY total_amount DESC, last_at DESC
+         LIMIT $${groupArgs.length}`,
+        groupArgs
       ),
       query<{ sender_phone: string }>(
         `SELECT DISTINCT t.sender_phone
@@ -1129,49 +1334,79 @@ export const dbApi = {
       ),
     ]);
 
-    const byReceiver = new Map<string, ReceiverGroup>();
-    for (const row of rowsRes.rows) {
-      let group = byReceiver.get(row.receiver_phone);
-      if (!group) {
-        group = {
-          phone: row.receiver_phone,
-          totalAmount: 0,
-          totalFee: 0,
-          successCount: 0,
-          lastAt: 0,
-          transfers: [],
-        };
-        byReceiver.set(row.receiver_phone, group);
-      }
-      group.transfers.push(row);
-      group.totalAmount += row.amount;
-      group.totalFee += row.fee || 0;
-      group.successCount += 1;
-      if (row.created_at > group.lastAt) group.lastAt = row.created_at;
-    }
+    let transferCount = 0;
+    const groups: ReceiverGroup[] = groupsRes.rows.map((r) => {
+      const successCount = Number(r.success_count ?? 0);
+      transferCount += successCount;
+      return {
+        phone: String(r.phone),
+        totalAmount: Number(r.total_amount ?? 0),
+        totalFee: Number(r.total_fee ?? 0),
+        successCount,
+        lastAt: Number(r.last_at ?? 0),
+      };
+    });
 
     return {
-      groups: [...byReceiver.values()],
+      groups,
       senders: sendersRes.rows.map((r) => r.sender_phone),
-      transferCount: rowsRes.rows.length,
+      transferCount,
     };
+  },
+
+  async receiverTransfers(
+    receiverPhone: string,
+    fromTs?: number,
+    toTs?: number,
+    sender?: string,
+    rexId?: number | null
+  ): Promise<TransferRow[]> {
+    const from = fromTs ?? 0;
+    const to = toTs ?? 9_999_999_999;
+
+    const args: unknown[] = [from, to, receiverPhone];
+    const clauses = [
+      `t.status = 'success'`,
+      `t.created_at >= $1`,
+      `t.created_at <= $2`,
+      `t.receiver_phone = $3`,
+    ];
+    if (rexId !== undefined && rexId !== null) {
+      args.push(rexId);
+      clauses.push(`t.rex_id = $${args.length}`);
+    }
+    if (sender) {
+      args.push(sender);
+      clauses.push(`t.sender_phone = $${args.length}`);
+    }
+    args.push(RECEIVER_DETAIL_CAP);
+
+    const res = await query<TransferRow>(
+      `SELECT ${TRANSFER_COLUMNS}
+       FROM transfers t
+       LEFT JOIN rex_groups rg ON rg.id = t.rex_id
+       LEFT JOIN users u ON u.id = t.created_by_user_id
+       WHERE ${clauses.join(" AND ")}
+       ORDER BY t.created_at DESC, t.id DESC
+       LIMIT $${args.length}`,
+      args
+    );
+    return res.rows;
   },
 
   async trayStats(rexId?: number | null) {
     const args: unknown[] = [];
     const simWhere = rexId !== undefined && rexId !== null ? `WHERE rex_id = $1` : "";
-    const activeWhere =
-      rexId !== undefined && rexId !== null
-        ? `WHERE status = 'active' AND rex_id = $1`
-        : `WHERE status = 'active'`;
     if (rexId !== undefined && rexId !== null) args.push(rexId);
 
     const [simStatsRes, recent] = await Promise.all([
       query<{ sim_count: number; logged_in: number; total_balance: number }>(
         `SELECT
-           (SELECT COUNT(*)::int FROM sims ${simWhere}) AS sim_count,
-           (SELECT COUNT(*)::int FROM sims ${activeWhere}) AS logged_in,
-           (SELECT COALESCE(SUM(balance), 0)::bigint FROM sims ${activeWhere}) AS total_balance`,
+           COUNT(*)::int AS sim_count,
+           COUNT(*) FILTER (WHERE status = 'active')::int AS logged_in,
+           COALESCE(SUM(balance) FILTER (WHERE status = 'active'), 0)::bigint AS total_balance
+         FROM sims
+         ${simWhere}`,
         args
       ),
       this.listTransfers(5, undefined, undefined, rexId),

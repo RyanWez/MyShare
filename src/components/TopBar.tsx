@@ -112,6 +112,18 @@ export default function TopBar({ onMenu }: { onMenu: () => void }) {
   const showRexSelector =
     permissions.rex.viewAll && REX_FILTER_ROUTES.has(pathname) && rexGroups.length > 0;
 
+  const rexSelectOptions = React.useMemo(
+    () => [
+      { value: "all", label: "All Rex", searchText: "All Rex" },
+      ...rexGroups.map((g) => ({
+        value: String(g.id),
+        label: `${g.name} (${g.sim_count ?? 0})`,
+        searchText: g.name,
+      })),
+    ],
+    [rexGroups]
+  );
+
   return (
     <header
       className={cn(
@@ -157,14 +169,10 @@ export default function TopBar({ onMenu }: { onMenu: () => void }) {
                 value={rexFilter}
                 onValueChange={setRexFilter}
                 align="right"
+                searchable
+                searchPlaceholder="Search Rex…"
                 triggerClassName="min-w-[130px] max-w-[170px]"
-                options={[
-                  { value: "all", label: "All Rex" },
-                  ...rexGroups.map((g) => ({
-                    value: String(g.id),
-                    label: `${g.name} (${g.sim_count ?? 0})`,
-                  })),
-                ]}
+                options={rexSelectOptions}
               />
             </div>
           )}
@@ -240,14 +248,10 @@ export default function TopBar({ onMenu }: { onMenu: () => void }) {
             aria-label="Filter by Rex category"
             value={rexFilter}
             onValueChange={setRexFilter}
+            searchable
+            searchPlaceholder="Search Rex…"
             className="flex-1"
-            options={[
-              { value: "all", label: "All Rex" },
-              ...rexGroups.map((g) => ({
-                value: String(g.id),
-                label: `${g.name} (${g.sim_count ?? 0})`,
-              })),
-            ]}
+            options={rexSelectOptions}
           />
         </div>
       )}

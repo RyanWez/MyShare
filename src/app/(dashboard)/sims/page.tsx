@@ -837,10 +837,16 @@ export default function SimsPage() {
                   value={targetRexId}
                   onValueChange={setTargetRexId}
                   disabled={otpSent}
+                  searchable
+                  searchPlaceholder="Search Rex…"
                   className="w-full"
                   options={[
-                    { value: "", label: "Unassigned (Admin only)" },
-                    ...rexGroups.map((g) => ({ value: String(g.id), label: g.name })),
+                    { value: "", label: "Unassigned (Admin only)", searchText: "Unassigned" },
+                    ...rexGroups.map((g) => ({
+                      value: String(g.id),
+                      label: g.name,
+                      searchText: g.name,
+                    })),
                   ]}
                 />
               </div>
@@ -1007,10 +1013,16 @@ export default function SimsPage() {
               aria-label="Target Rex category"
               value={moveTargetRexId}
               onValueChange={setMoveTargetRexId}
+              searchable
+              searchPlaceholder="Search Rex…"
               className="w-full"
               options={[
-                { value: "", label: "Unassigned (Admin only)" },
-                ...rexGroups.map((g) => ({ value: String(g.id), label: g.name })),
+                { value: "", label: "Unassigned (Admin only)", searchText: "Unassigned" },
+                ...rexGroups.map((g) => ({
+                  value: String(g.id),
+                  label: g.name,
+                  searchText: g.name,
+                })),
               ]}
             />
           </div>

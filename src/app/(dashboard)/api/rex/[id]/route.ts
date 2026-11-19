@@ -46,3 +46,32 @@ export async function PATCH(req: NextRequest, context: { params: { id: string } 
 
   return NextResponse.json({ ok: true, rex: updated });
 }
+
+export async function DELETE(req: NextRequest, context: { params: { id: string } }) {
+  const auth = await requireSession(req, (p) => p.users.manage);
+  if (!auth.ok) return auth.response;
+
+  const rexId = Number(context.params.id);
+  if (!Number.isInteger(rexId) || rexId <= 0) {
+    return NextResponse.json({ ok: false, error: "Invalid Rex id" }, { status: 400 });
+  }
+
+  const result = await dbApi.deleteRexGroup(rexId);
+  if (!result.deleted) {
+    return NextResponse.json(
+      { ok: false, error: result.reason ?? "Cannot delete Rex category" },
+      { status: result.status ?? 400 }
+    );
+  }
+
+  await dbApi.addAuditLog({
+    actorUserId: auth.user.id,
+    actorUsername: auth.user.username,
+    action: "rex.delete",
+    targetType: "rex",
+    targetId: String(rexId),
+    detail: { name: result.name },
+  });
+
+  return NextResponse.json({ ok: true, deleted: true, name: result.name });
+}

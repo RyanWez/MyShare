@@ -11,11 +11,11 @@ import { Select } from "@/components/ui/Select";
 import { DateRangePicker, type DateRange } from "@/components/ui/DateRangePicker";
 import { fmtAmount, fmtClock, fmtPhone, fmtPhoneGrouped, phoneSearchKeys } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { ApiError, fetchReceivers, invalidateCache } from "@/lib/api";
+import { ApiError, fetchReceivers, fetchReceiverTransfers, invalidateCache } from "@/lib/api";
 import { useLive } from "@/lib/liveEvents";
 import { useSession } from "@/components/SessionProvider";
 import { toast } from "sonner";
-import type { ReceiverGroup } from "@/lib/types";
+import type { ReceiverGroup, Transfer } from "@/lib/types";
 
 function getInitialTodayRange(): DateRange {
   const today = new Date();
@@ -117,6 +117,8 @@ export default function ReceiversPage() {
   const [groups, setGroups] = useState<GroupedReceiver[]>([]);
   const [senders, setSenders] = useState<string[]>([]);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [detailsByPhone, setDetailsByPhone] = useState<Record<string, Transfer[]>>({});
+  const [loadingDetailPhone, setLoadingDetailPhone] = useState<string | null>(null);
   const [page, setPage] = useState(1);
 
   // ---- Advanced filters ----------------------------------------------------
@@ -135,6 +137,30 @@ export default function ReceiversPage() {
   // an earlier request is still open, and without this the slower one wins and
   // renders totals that don't match the controls.
   const requestSeq = useRef(0);
+  const expandedRef = useRef(expandedId);
+  expandedRef.current = expandedId;
+
+  const loadReceiverDetail = useCallback(
+    (phone: string, bypass = false) => {
+      if (sessionLoading || !permissions.receivers.view) return;
+      const from = range.from ?? undefined;
+      const to = range.to ?? undefined;
+      setLoadingDetailPhone(phone);
+      if (bypass) invalidateCache(`receiverDetail:${phone}`);
+      fetchReceiverTransfers(phone, from, to, senderFilter || undefined, {
+        bypassCache: bypass,
+        rexId: rexFilter,
+      })
+        .then((rows) => {
+          setDetailsByPhone((prev) => ({ ...prev, [phone]: rows }));
+        })
+        .catch(() => {})
+        .finally(() => {
+          setLoadingDetailPhone((cur) => (cur === phone ? null : cur));
+        });
+    },
+    [range, senderFilter, rexFilter, sessionLoading, permissions.receivers.view]
+  );
 
   const runFetch = useCallback(
     (opts?: { bypass?: boolean }) => {
@@ -146,7 +172,10 @@ export default function ReceiversPage() {
 
       const seq = ++requestSeq.current;
       setLoading(true);
-      if (opts?.bypass) invalidateCache("receivers");
+      if (opts?.bypass) {
+        invalidateCache("receivers");
+        invalidateCache("receiverDetail");
+      }
 
       fetchReceivers(from, to, senderFilter || undefined, {
         bypassCache: opts?.bypass,
@@ -157,7 +186,12 @@ export default function ReceiversPage() {
           if (seq !== requestSeq.current) return;
           setGroups(data.groups);
           setSenders(data.senders);
+          setDetailsByPhone({});
           setError(null);
+          const openPhone = expandedRef.current;
+          if (openPhone && data.groups.some((g) => g.phone === openPhone)) {
+            loadReceiverDetail(openPhone, Boolean(opts?.bypass));
+          }
         })
         .catch((err) => {
           if (seq !== requestSeq.current) return;
@@ -169,8 +203,19 @@ export default function ReceiversPage() {
           setInitialLoaded(true);
         });
     },
-    [range, senderFilter, rexFilter, sessionLoading, permissions.receivers.view]
+    [range, senderFilter, rexFilter, sessionLoading, permissions.receivers.view, loadReceiverDetail]
   );
+
+  function toggleExpand(phone: string) {
+    if (expandedId === phone) {
+      setExpandedId(null);
+      return;
+    }
+    setExpandedId(phone);
+    if (!detailsByPhone[phone]) {
+      loadReceiverDetail(phone);
+    }
+  }
 
   useEffect(() => {
     runFetch();
@@ -329,10 +374,16 @@ export default function ReceiversPage() {
                   setPage(1);
                 }}
                 mono
+                searchable
+                searchPlaceholder="Search SIM…"
                 className="w-full"
                 options={[
-                  { value: "", label: "All senders" },
-                  ...senders.map((p) => ({ value: p, label: fmtPhoneGrouped(p) })),
+                  { value: "", label: "All senders", searchText: "All senders" },
+                  ...senders.map((p) => ({
+                    value: p,
+                    label: fmtPhoneGrouped(p),
+                    searchText: `${fmtPhone(p)} ${p}`,
+                  })),
                 ]}
               />
             </div>
@@ -450,10 +501,12 @@ export default function ReceiversPage() {
                 <ul className="divide-y divide-hairline flex flex-col">
                   {pageRows.map((g) => {
                     const isExpanded = expandedId === g.phone;
+                    const transfers = g.transfers ?? detailsByPhone[g.phone];
+                    const detailLoading = !transfers && loadingDetailPhone === g.phone;
                     return (
                       <li key={g.phone} className="flex flex-col">
                         <button
-                          onClick={() => setExpandedId(isExpanded ? null : g.phone)}
+                          onClick={() => toggleExpand(g.phone)}
                           className={cn(
                             "flex items-center justify-between p-4 text-left transition-colors hover:bg-white/[0.02]",
                             isExpanded && "bg-white/[0.02]"
@@ -514,39 +567,51 @@ export default function ReceiversPage() {
                                 className={cn(
                                   TRANSFERS_VIEWPORT,
                                   "overflow-y-auto overscroll-contain",
-                                  g.transfers.length > 5 && "pr-1"
+                                  (transfers?.length ?? 0) > 5 && "pr-1"
                                 )}
                               >
-                                <ul className="space-y-3">
-                                  {[...g.transfers]
-                                    .sort((a, b) => b.created_at - a.created_at)
-                                    .map((t) => (
-                                      <li
-                                        key={t.id}
-                                        className="flex items-center justify-between gap-4 rounded-md border border-hairline bg-card p-3 shadow-sm"
-                                      >
-                                        <div className="flex flex-col">
-                                          <span className="font-mono text-[13px] text-ink">
-                                            From: {fmtPhoneGrouped(t.sender_phone)}
-                                          </span>
-                                          <span className="font-mono text-[10px] text-ink-mute">
-                                            {fmtClock(t.created_at)}
-                                          </span>
-                                        </div>
-                                        <div className="flex flex-col items-end">
-                                          <span className="font-mono text-[13px] font-medium text-ink tnum">
-                                            {fmtAmount(t.amount)}{" "}
-                                            <span className="text-[10px] text-ink-mute">Ks</span>
-                                          </span>
-                                          {t.fee > 0 && (
-                                            <span className="font-mono text-[10px] text-ink-mute">
-                                              Fee: {fmtAmount(t.fee)} Ks
-                                            </span>
-                                          )}
-                                        </div>
-                                      </li>
+                                {detailLoading ? (
+                                  <div className="space-y-2 animate-pulse">
+                                    {[1, 2].map((i) => (
+                                      <div key={i} className="h-14 rounded-md border border-hairline bg-card/60" />
                                     ))}
-                                </ul>
+                                  </div>
+                                ) : !transfers || transfers.length === 0 ? (
+                                  <p className="py-2 text-center font-mono text-xs text-ink-mute">
+                                    No transfers loaded for this receiver.
+                                  </p>
+                                ) : (
+                                  <ul className="space-y-3">
+                                    {[...transfers]
+                                      .sort((a, b) => b.created_at - a.created_at)
+                                      .map((t) => (
+                                        <li
+                                          key={t.id}
+                                          className="flex items-center justify-between gap-4 rounded-md border border-hairline bg-card p-3 shadow-sm"
+                                        >
+                                          <div className="flex flex-col">
+                                            <span className="font-mono text-[13px] text-ink">
+                                              From: {fmtPhoneGrouped(t.sender_phone)}
+                                            </span>
+                                            <span className="font-mono text-[10px] text-ink-mute">
+                                              {fmtClock(t.created_at)}
+                                            </span>
+                                          </div>
+                                          <div className="flex flex-col items-end">
+                                            <span className="font-mono text-[13px] font-medium text-ink tnum">
+                                              {fmtAmount(t.amount)}{" "}
+                                              <span className="text-[10px] text-ink-mute">Ks</span>
+                                            </span>
+                                            {t.fee > 0 && (
+                                              <span className="font-mono text-[10px] text-ink-mute">
+                                                Fee: {fmtAmount(t.fee)} Ks
+                                              </span>
+                                            )}
+                                          </div>
+                                        </li>
+                                      ))}
+                                  </ul>
+                                )}
                               </div>
                             </div>
                           </div>

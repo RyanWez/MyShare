@@ -104,7 +104,7 @@ export interface ReceiverGroup {
   totalFee: number;
   successCount: number;
   lastAt: number;
-  transfers: Transfer[];
+  transfers?: Transfer[];
 }
 
 export interface ReceiversResponse {

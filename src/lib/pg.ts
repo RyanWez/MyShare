@@ -4,6 +4,7 @@
  */
 import { Pool, types, type PoolClient, type QueryResult, type QueryResultRow } from "pg";
 import { hashPassword, verifyPasswordHash } from "./password";
+import { parseBillExpireDate } from "./format";
 import { DEFAULT_ADMIN_PERMISSIONS, DEFAULT_STAFF_PERMISSIONS } from "./permissions";
 
 // Parse PostgreSQL INT8 / BIGINT (OID 20) into JS numbers (safe for unix ts & MMK amounts).
@@ -38,6 +39,7 @@ function createPool(): Pool {
     max: Number(process.env.PG_POOL_MAX) || 10,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 10_000,
+    query_timeout: 15_000,
   });
 }
 
@@ -99,6 +101,7 @@ async function initSchemaAndSeed(): Promise<void> {
         balance BIGINT,
         balance_checked_at BIGINT,
         bill_expire_at TEXT,
+        bill_expire_date DATE,
         block_one_way TEXT,
         block_two_way TEXT,
         sim_status_text TEXT,
@@ -133,17 +136,61 @@ async function initSchemaAndSeed(): Promise<void> {
         created_at BIGINT NOT NULL
       );
 
+      ALTER TABLE sims ADD COLUMN IF NOT EXISTS bill_expire_date DATE;
+
       CREATE INDEX IF NOT EXISTS idx_transfers_created_status ON transfers(created_at, status);
       CREATE INDEX IF NOT EXISTS idx_transfers_created_id ON transfers(created_at DESC, id DESC);
       CREATE INDEX IF NOT EXISTS idx_transfers_sender ON transfers(sender_phone);
       CREATE INDEX IF NOT EXISTS idx_transfers_rex_created ON transfers(rex_id, created_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS idx_transfers_status_created_sender ON transfers(status, created_at, sender_phone);
+      CREATE INDEX IF NOT EXISTS idx_transfers_rex_status_created ON transfers(rex_id, status, created_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS idx_transfers_receiver_created ON transfers(receiver_phone, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_sims_status ON sims(status);
       CREATE INDEX IF NOT EXISTS idx_sims_updated ON sims(updated_at DESC);
       CREATE INDEX IF NOT EXISTS idx_sims_rex_status ON sims(rex_id, status);
+      CREATE INDEX IF NOT EXISTS idx_sims_rex_exp_date ON sims(rex_id, bill_expire_date);
       CREATE INDEX IF NOT EXISTS idx_users_role ON users(role_id);
       CREATE INDEX IF NOT EXISTS idx_users_rex ON users(rex_id);
       CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC);
+
+      DO $$
+      BEGIN
+        CREATE EXTENSION IF NOT EXISTS pg_trgm;
+        CREATE INDEX IF NOT EXISTS idx_sims_phone_trgm ON sims USING GIN (phone gin_trgm_ops);
+        CREATE INDEX IF NOT EXISTS idx_sims_note_trgm ON sims USING GIN (LOWER(COALESCE(note, '')) gin_trgm_ops);
+        CREATE INDEX IF NOT EXISTS idx_transfers_sender_trgm ON transfers USING GIN (sender_phone gin_trgm_ops);
+        CREATE INDEX IF NOT EXISTS idx_transfers_receiver_trgm ON transfers USING GIN (receiver_phone gin_trgm_ops);
+        CREATE INDEX IF NOT EXISTS idx_transfers_msg_trgm ON transfers USING GIN (LOWER(COALESCE(message, '')) gin_trgm_ops);
+      EXCEPTION WHEN OTHERS THEN
+        NULL;
+      END
+      $$;
     `);
+
+    // Backfill pre-parsed bill_expire_date once for existing SIM rows.
+    const unparsedSims = await client.query<{ id: number; bill_expire_at: string }>(
+      `SELECT id, bill_expire_at FROM sims WHERE bill_expire_at IS NOT NULL AND bill_expire_date IS NULL`
+    );
+    if (unparsedSims.rows.length > 0) {
+      const ids: number[] = [];
+      const dates: string[] = [];
+      for (const row of unparsedSims.rows) {
+        const iso = parseBillExpireDate(row.bill_expire_at);
+        if (iso) {
+          ids.push(row.id);
+          dates.push(iso);
+        }
+      }
+      if (ids.length > 0) {
+        await client.query(
+          `UPDATE sims AS s
+           SET bill_expire_date = v.d
+           FROM (SELECT UNNEST($1::int[]) AS id, UNNEST($2::date[]) AS d) AS v
+           WHERE s.id = v.id`,
+          [ids, dates]
+        );
+      }
+    }
 
     const ts = nowSec();
 
