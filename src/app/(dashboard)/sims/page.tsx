@@ -277,21 +277,28 @@ export default function SimsPage() {
       });
       const r = await res.json().catch(() => ({ ok: false, message: `Server error (${res.status})` }));
       if (res.ok && r.ok) {
+        const needsBalanceRead = r.balance === null || r.balance === undefined;
         toast.success(
           r.registered
             ? `${fmtPhoneGrouped(phone)} registered and logged in`
             : `${fmtPhoneGrouped(phone)} logged in`,
           {
             description:
-              r.balance !== null && r.balance !== undefined
+              !needsBalanceRead
                 ? `Balance ${fmtKs(r.balance)}.`
-                : "Balance not read yet — use the refresh button on the card.",
+                : "Syncing balance…",
           }
         );
         setLoginOpen(false);
         invalidateCache();
         load(true);
         void refreshSession();
+
+        if (needsBalanceRead) {
+          setTimeout(() => {
+            void refreshBalance(phone);
+          }, 600);
+        }
       } else {
         const msg = r.message || r.error || "Check the code or password and try again.";
         const isNewCode = r.errorCode === 401 || String(msg).toLowerCase().includes("new code");
@@ -321,16 +328,17 @@ export default function SimsPage() {
   }
 
   const refreshBalance = useCallback(
-    async (sim: Sim) => {
-      setRefreshing(sim.phone);
+    async (simOrPhone: Sim | string) => {
+      const phoneNum = typeof simOrPhone === "string" ? simOrPhone : simOrPhone.phone;
+      setRefreshing(phoneNum);
       try {
         const r = await fetch("/api/sims/refresh", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ phone: sim.phone }),
+          body: JSON.stringify({ phone: phoneNum }),
         }).then((res) => res.json());
         if (r.ok) {
-          toast.success(`${fmtPhoneGrouped(sim.phone)} balance read`, {
+          toast.success(`${fmtPhoneGrouped(phoneNum)} balance read`, {
             description:
               r.balance !== null && r.balance !== undefined
                 ? `${fmtKs(r.balance)}${r.billExpireAt ? ` · Exp ${r.billExpireAt}` : ""}`
@@ -338,9 +346,9 @@ export default function SimsPage() {
           });
         } else if (r.needsLogin) {
           toast.error("Token expired", {
-            description: `Log in ${fmtPhoneGrouped(sim.phone)} again to keep using it.`,
+            description: `Log in ${fmtPhoneGrouped(phoneNum)} again to keep using it.`,
             action: permissions.sims.addLogin
-              ? { label: "Log in", onClick: () => openLogin(sim.phone) }
+              ? { label: "Log in", onClick: () => openLogin(phoneNum) }
               : undefined,
           });
         } else {
@@ -605,12 +613,11 @@ export default function SimsPage() {
             )}
             {permissions.sims.addLogin && (
               <Button
-                variant="secondary"
                 size="sm"
                 onClick={() => openLogin()}
-                className="shrink-0 transition-transform hover:scale-105 active:scale-95"
+                className="shrink-0 bg-emerald-600 hover:bg-emerald-500 text-white border border-emerald-500/40 font-medium shadow-sm shadow-emerald-950/40 transition-all hover:scale-105 active:scale-95"
               >
-                <Plus className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+                <Plus className="h-3.5 w-3.5" strokeWidth={2.5} aria-hidden="true" />
                 Log in a SIM
               </Button>
             )}
@@ -697,8 +704,11 @@ export default function SimsPage() {
           }
           action={
             permissions.sims.addLogin ? (
-              <Button onClick={() => openLogin()} className="transition-transform hover:scale-105 active:scale-95 shadow-md">
-                <Plus className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+              <Button
+                onClick={() => openLogin()}
+                className="bg-emerald-600 hover:bg-emerald-500 text-white border border-emerald-500/40 font-medium shadow-md shadow-emerald-950/40 transition-all hover:scale-105 active:scale-95"
+              >
+                <Plus className="h-3.5 w-3.5" strokeWidth={2.5} aria-hidden="true" />
                 Log in a SIM
               </Button>
             ) : undefined
