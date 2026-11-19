@@ -39,7 +39,7 @@ export async function POST(req: NextRequest) {
       needsLogin: false,
     });
   } catch (err: any) {
-    console.error("[transfer/send] Error:", err);
+    console.error(`[transfer/send] ${err?.message || err}`);
     return NextResponse.json(
       { ok: false, error: err?.message || "Failed to reach Mytel server" },
       { status: 502 }

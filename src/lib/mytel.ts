@@ -206,7 +206,11 @@ async function json<T>(res: Response): Promise<T> {
   try {
     return JSON.parse(text) as T;
   } catch {
-    throw new Error(`Non-JSON response (${res.status}): ${text.slice(0, 200)}`);
+    const titleMatch = text.match(/<title>([^<]+)<\/title>/i);
+    const summary = titleMatch
+      ? titleMatch[1].trim()
+      : text.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim().slice(0, 100);
+    throw new Error(`Mytel API Error (${res.status})${summary ? `: ${summary}` : ""}`);
   }
 }
 

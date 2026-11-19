@@ -70,7 +70,7 @@ export async function POST(req: NextRequest) {
       balance,
     });
   } catch (err: any) {
-    console.error("[verify-otp] Error:", err);
+    console.error(`[verify-otp] ${err?.message || err}`);
     return NextResponse.json(
       {
         ok: false,

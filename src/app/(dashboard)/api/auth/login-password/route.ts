@@ -44,7 +44,7 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ ok: true, subscriptionId, balance });
   } catch (err: any) {
-    console.error("[login-password] Error:", err);
+    console.error(`[login-password] ${err?.message || err}`);
     return NextResponse.json(
       {
         ok: false,

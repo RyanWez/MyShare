@@ -86,7 +86,7 @@ export async function POST(req: NextRequest) {
       transferId: transfer.id,
     });
   } catch (err: any) {
-    console.error("[transfer/confirm] Error:", err);
+    console.error(`[transfer/confirm] ${err?.message || err}`);
     return NextResponse.json(
       { ok: false, error: err?.message || "Failed to reach Mytel server" },
       { status: 502 }

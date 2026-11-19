@@ -72,7 +72,7 @@ export async function POST(req: NextRequest) {
       simStatusText: detail?.currentStatus ?? sim.sim_status_text,
     });
   } catch (err: any) {
-    console.error("[sims/refresh] Error:", err);
+    console.error(`[sims/refresh] ${err?.message || err}`);
     return NextResponse.json(
       { ok: false, error: err?.message || "Failed to reach Mytel server" },
       { status: 502 }
