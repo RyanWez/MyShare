@@ -1,23 +1,17 @@
 /** Chart geometry, palette and range helpers. Client-safe — no server imports. */
 
 /**
- * Two status hues, not a categorical pair: these encode success and failure, so they
- * come from the design system's `signal` / `alert` ramps rather than a series order.
- *
- * The green is a step deeper than the UI's `signal.deep` (#00A855). Validated against
- * the `card` surface (#FBFAF8): #00A855 sat at 2.99:1 contrast and only 6.5 CVD ΔE
- * from the red, while #008542 clears both (3.4:1, ΔE 8.5 deutan). Status colour never
- * travels alone here either — the legend, the end labels and the tooltip all name the
- * series in text.
+ * Theme-aware chart ink backed by CSS custom properties from globals.css,
+ * so curves, fills, and axes stay vibrant and legible in both light and dark modes.
  */
 export const CHART_INK = {
-  sent: "#008542",
-  failed: "#DE2A20",
+  sent: "rgb(var(--chart-sent))",
+  failed: "rgb(var(--chart-failed))",
   /** Money, per the palette's one rule for brass. */
-  volume: "#A87F28",
-  grid: "#DCD8D1",
-  axis: "#A9ADB5",
-  surface: "#FBFAF8",
+  volume: "rgb(var(--chart-volume))",
+  grid: "rgb(var(--hairline))",
+  axis: "rgb(var(--ink-faint))",
+  surface: "rgb(var(--card))",
 } as const;
 
 export interface Pt {

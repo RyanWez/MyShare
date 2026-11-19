@@ -17,10 +17,10 @@ interface ErrorPieChartProps {
 
 const COLORS = [
   CHART_INK.failed,
-  "#F87171", // red-400
-  "#FCA5A5", // red-300
-  "#FECACA", // red-200
-  "#FEE2E2", // red-100
+  "#FB7185", // rose-400
+  "#F97316", // orange-500
+  "#F59E0B", // amber-500
+  "#A78BFA", // violet-400
 ];
 
 /**

@@ -20,6 +20,7 @@ import { CooldownSeconds, useCooldownActive } from "@/components/Cooldown";
 import { useSessionState } from "@/lib/useSessionState";
 import { useLocalState } from "@/lib/useLocalState";
 import { DAILY_VOLUME_LIMIT, MONTHLY_VOLUME_LIMIT } from "@/lib/constants";
+import { useSession } from "@/components/SessionProvider";
 import type { Sim } from "@/lib/types";
 
 const QUICK = [500, 800, 1000, 5000];
@@ -72,6 +73,7 @@ interface Snapshot {
 }
 
 export default function TransferPage() {
+  const { loading: sessionLoading, permissions, rexFilter } = useSession();
   const [sims, setSims] = useState<Sim[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [sender, setSender] = useSessionState("transfer_sender", "");
@@ -92,7 +94,8 @@ export default function TransferPage() {
   const cooldownActive = useCooldownActive(resendAt);
 
   const loadSims = useCallback(() => {
-    return fetchSims()
+    if (sessionLoading || !permissions.transfer.view) return Promise.resolve();
+    return fetchSims({ rexId: rexFilter })
       .then((all) => {
         setSims(all);
         setSender((cur) => {
@@ -102,7 +105,7 @@ export default function TransferPage() {
       })
       .catch(() => {})
       .finally(() => setLoaded(true));
-  }, [setSender]);
+  }, [setSender, rexFilter, sessionLoading, permissions.transfer.view]);
 
   useEffect(() => {
     loadSims();
@@ -268,6 +271,15 @@ export default function TransferPage() {
     setTimeout(() => document.getElementById("to-input")?.focus(), 50);
   }
 
+  if (!sessionLoading && !permissions.transfer.view) {
+    return (
+      <EmptyState
+        title="Access restricted"
+        body="Your role does not include Transfer access."
+      />
+    );
+  }
+
   if (loaded && activeSims.length === 0 && stage === "form") {
     return (
       <EmptyState
@@ -284,12 +296,14 @@ export default function TransferPage() {
         title="No SIM is logged in"
         body="A transfer needs a logged-in sender SIM — its OTP is what authorises the debit."
         action={
-          <Button asChild className="shadow-md transition-transform hover:scale-105 active:scale-95">
-            <Link href="/sims">
-              Log in a SIM
-              <ArrowRight className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
-            </Link>
-          </Button>
+          permissions.sims.addLogin ? (
+            <Button asChild className="shadow-md transition-transform hover:scale-105 active:scale-95">
+              <Link href="/sims">
+                Log in a SIM
+                <ArrowRight className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+              </Link>
+            </Button>
+          ) : undefined
         }
       />
     );
@@ -562,7 +576,11 @@ export default function TransferPage() {
 
       {/* Actions */}
       <div className="flex flex-wrap gap-3 border-t border-hairline pt-6">
-        {stage === "form" ? (
+        {!permissions.transfer.execute ? (
+          <p className="text-xs text-ink-mute">
+            Your role allows viewing this page only — transfer execution is disabled.
+          </p>
+        ) : stage === "form" ? (
           <Button
             size="lg"
             loading={busy}

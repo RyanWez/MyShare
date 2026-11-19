@@ -4,8 +4,6 @@
 FROM node:22-slim AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
-# better-sqlite3 ships prebuilt binaries for linux-x64/glibc, so node:22-slim
-# (Debian) installs without a compiler toolchain.
 RUN npm ci
 
 # --- builder: compile the Next.js app ---------------------------------------

@@ -31,6 +31,7 @@ import {
 import { cn } from "@/lib/utils";
 import { ApiError, fetchHistoryPage, invalidateCache, type HistoryPage } from "@/lib/api";
 import { useLive } from "@/lib/liveEvents";
+import { useSession } from "@/components/SessionProvider";
 import type { Transfer } from "@/lib/types";
 
 type Filter = "all" | "success" | "pending" | "failed";
@@ -205,6 +206,7 @@ function SwipeableRow({ children, onDelete }: { children: React.ReactNode; onDel
 }
 
 export default function HistoryPage() {
+  const { loading: sessionLoading, permissions, rexFilter } = useSession();
   // ---- Server-driven view state -------------------------------------------
   const [dateRange, setDateRange] = useState<DateRange>(getInitialTodayRange);
   const [filter, setFilter] = useState<Filter>("all");
@@ -243,6 +245,7 @@ export default function HistoryPage() {
 
   const runFetch = useCallback(
     (opts?: { bypass?: boolean }) => {
+      if (sessionLoading || !permissions.history.view) return;
       const seq = ++requestSeq.current;
       setLoading(true);
       if (opts?.bypass) invalidateCache("history");
@@ -252,6 +255,7 @@ export default function HistoryPage() {
           to: dateRange.to ?? undefined,
           status: filter !== "all" ? filter : undefined,
           q: query || undefined,
+          rexId: rexFilter,
           page,
           pageSize: PAGE_SIZE,
         },
@@ -272,7 +276,7 @@ export default function HistoryPage() {
           setInitialLoaded(true);
         });
     },
-    [dateRange, filter, query, page]
+    [dateRange, filter, query, rexFilter, page, sessionLoading, permissions.history.view]
   );
 
   useEffect(() => {
@@ -298,9 +302,10 @@ export default function HistoryPage() {
     if (dateRange.to) p.set("to", String(dateRange.to));
     if (filter !== "all") p.set("status", filter);
     if (query) p.set("q", query);
+    if (rexFilter && rexFilter !== "all") p.set("rexId", rexFilter);
     const s = p.toString();
     return s ? `/api/history/export?${s}` : "/api/history/export";
-  }, [dateRange, filter, query]);
+  }, [dateRange, filter, query, rexFilter]);
 
   // Group the visible page by day for the dated sections.
   const days = useMemo(() => {
@@ -377,8 +382,16 @@ export default function HistoryPage() {
     }
   }
 
-  if (!initialLoaded) {
+  if (sessionLoading || (!initialLoaded && permissions.history.view)) {
     return <HistorySkeleton />;
+  }
+
+  if (!permissions.history.view) {
+    return (
+      <div className="max-w-5xl mx-auto pt-6">
+        <EmptyState title="Access restricted" body="Your role does not include History access." />
+      </div>
+    );
   }
 
   // Nothing read at all: "0 attempts" would read as a quiet day, not a failure.
@@ -467,17 +480,19 @@ export default function HistoryPage() {
           />
 
           {/* Server builds the CSV from every matching row, not just this page. */}
-          <Button variant="outline" size="sm" asChild>
-            <a
-              href={exportHref}
-              title="Download every matching record as CSV"
-              aria-disabled={total === 0}
-              className={cn("inline-flex items-center gap-1.5", total === 0 && "pointer-events-none opacity-50")}
-            >
-              <Download className="h-3.5 w-3.5" strokeWidth={1.75} aria-hidden="true" />
-              CSV
-            </a>
-          </Button>
+          {permissions.history.export && (
+            <Button variant="outline" size="sm" asChild>
+              <a
+                href={exportHref}
+                title="Download every matching record as CSV"
+                aria-disabled={total === 0}
+                className={cn("inline-flex items-center gap-1.5", total === 0 && "pointer-events-none opacity-50")}
+              >
+                <Download className="h-3.5 w-3.5" strokeWidth={1.75} aria-hidden="true" />
+                CSV
+              </a>
+            </Button>
+          )}
         </div>
       </div>
 
@@ -592,57 +607,69 @@ export default function HistoryPage() {
                   const failed = t.status === "failed";
                   const reason =
                     t.message ?? (t.error_code !== null ? `Error ${t.error_code}` : null);
+                  const rowBody = (
+                    <>
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                        <StatusDot tone={badge.tone} size="sm" />
+                        <span className="shrink-0 font-mono text-xs tnum text-ink-mute">
+                          {fmtClock(t.created_at)}
+                        </span>
+
+                        {permissions.rex.viewAll && t.rex_name && (
+                          <span className="rounded border border-hairline bg-substrate/80 px-1.5 py-0.5 font-mono text-[9.5px] uppercase text-ink-mute">
+                            {t.rex_name}
+                          </span>
+                        )}
+
+                        <span className="order-3 flex min-w-0 flex-1 basis-full items-center gap-2 font-mono text-xs tnum text-ink-soft sm:order-none sm:basis-auto">
+                          <CopyablePhone phone={t.sender_phone} />
+                          <ArrowRight
+                            className="h-3 w-3 shrink-0 text-brass"
+                            strokeWidth={2}
+                            aria-hidden="true"
+                          />
+                          <CopyablePhone phone={t.receiver_phone} />
+                        </span>
+
+                        <span className="order-2 ml-auto shrink-0 text-right sm:order-none">
+                          <span className="font-mono text-sm tnum text-brass-deep">
+                            {fmtAmount(t.amount)}
+                          </span>
+                          <span className="ml-2 font-mono text-xs tnum text-ink-faint">
+                            +{fmtAmount(t.fee)} fee
+                          </span>
+                        </span>
+                      </div>
+
+                      {failed && reason && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            applyQueryNow(reason.startsWith("Error ") ? reason.slice(6) : reason)
+                          }
+                          title="Show transfers with this error"
+                          className="mt-1.5 ml-[18px] block max-w-full truncate text-left text-xs text-alert-deep underline decoration-dotted underline-offset-2 transition-colors hover:text-alert"
+                        >
+                          {reason}
+                        </button>
+                      )}
+                      {!failed && t.status !== "success" && (
+                        <div className="mt-1.5 pl-[18px] font-mono text-eyebrow uppercase text-ink-faint">
+                          {badge.label}
+                        </div>
+                      )}
+                    </>
+                  );
+
                   return (
                     <li key={t.id} className="p-0 m-0 border-0 bg-card">
-                      <SwipeableRow onDelete={() => setDeleteId(t.id)}>
-                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                          <StatusDot tone={badge.tone} size="sm" />
-                          <span className="shrink-0 font-mono text-xs tnum text-ink-mute">
-                            {fmtClock(t.created_at)}
-                          </span>
-
-                          {/* Narrow screens reorder to two lines — clock and money on the
-                              first, the phone pair on the second — so amounts stay in a
-                              single right-hand column instead of each row growing a third line.
-                              Either number copies itself on hover/click. */}
-                          <span className="order-3 flex min-w-0 flex-1 basis-full items-center gap-2 font-mono text-xs tnum text-ink-soft sm:order-none sm:basis-auto">
-                            <CopyablePhone phone={t.sender_phone} />
-                            <ArrowRight
-                              className="h-3 w-3 shrink-0 text-brass"
-                              strokeWidth={2}
-                              aria-hidden="true"
-                            />
-                            <CopyablePhone phone={t.receiver_phone} />
-                          </span>
-
-                          <span className="order-2 ml-auto shrink-0 text-right sm:order-none">
-                            <span className="font-mono text-sm tnum text-brass-deep">
-                              {fmtAmount(t.amount)}
-                            </span>
-                            <span className="ml-2 font-mono text-xs tnum text-ink-faint">
-                              +{fmtAmount(t.fee)} fee
-                            </span>
-                          </span>
+                      {permissions.history.delete ? (
+                        <SwipeableRow onDelete={() => setDeleteId(t.id)}>{rowBody}</SwipeableRow>
+                      ) : (
+                        <div className="w-full bg-card px-4 py-3 transition-colors hover:bg-substrate">
+                          {rowBody}
                         </div>
-
-                        {failed && reason && (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              applyQueryNow(reason.startsWith("Error ") ? reason.slice(6) : reason)
-                            }
-                            title="Show transfers with this error"
-                            className="mt-1.5 ml-[18px] block max-w-full truncate text-left text-xs text-alert-deep underline decoration-dotted underline-offset-2 transition-colors hover:text-alert"
-                          >
-                            {reason}
-                          </button>
-                        )}
-                        {!failed && t.status !== "success" && (
-                          <div className="mt-1.5 pl-[18px] font-mono text-eyebrow uppercase text-ink-faint">
-                            {badge.label}
-                          </div>
-                        )}
-                      </SwipeableRow>
+                      )}
                     </li>
                   );
                 })}

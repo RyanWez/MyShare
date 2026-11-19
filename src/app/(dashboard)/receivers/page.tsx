@@ -7,11 +7,13 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { ErrorBanner, ErrorState } from "@/components/ui/ErrorState";
 import { Pagination } from "@/components/ui/Pagination";
 import { SegmentedControl } from "@/components/ui/SegmentedControl";
+import { Select } from "@/components/ui/Select";
 import { DateRangePicker, type DateRange } from "@/components/ui/DateRangePicker";
 import { fmtAmount, fmtClock, fmtPhone, fmtPhoneGrouped, phoneSearchKeys } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { ApiError, fetchReceivers, invalidateCache } from "@/lib/api";
 import { useLive } from "@/lib/liveEvents";
+import { useSession } from "@/components/SessionProvider";
 import { toast } from "sonner";
 import type { ReceiverGroup } from "@/lib/types";
 
@@ -106,6 +108,7 @@ function TransferBadge({ count }: { count: number }) {
 }
 
 export default function ReceiversPage() {
+  const { loading: sessionLoading, permissions, rexFilter } = useSession();
   const [range, setRange] = useState<DateRange>(getInitialTodayRange);
   const [searchQuery, setSearchQuery] = useState("");
   const [loading, setLoading] = useState(true);
@@ -135,6 +138,7 @@ export default function ReceiversPage() {
 
   const runFetch = useCallback(
     (opts?: { bypass?: boolean }) => {
+      if (sessionLoading || !permissions.receivers.view) return;
       // Both bounds may be null — that is the picker's "All Time", not a missing
       // range, and it must still fetch.
       const from = range.from ?? undefined;
@@ -147,6 +151,7 @@ export default function ReceiversPage() {
       fetchReceivers(from, to, senderFilter || undefined, {
         bypassCache: opts?.bypass,
         noDelay: true,
+        rexId: rexFilter,
       })
         .then((data) => {
           if (seq !== requestSeq.current) return;
@@ -164,7 +169,7 @@ export default function ReceiversPage() {
           setInitialLoaded(true);
         });
     },
-    [range, senderFilter]
+    [range, senderFilter, rexFilter, sessionLoading, permissions.receivers.view]
   );
 
   useEffect(() => {
@@ -231,8 +236,16 @@ export default function ReceiversPage() {
     setPage(1);
   }
 
-  if (!initialLoaded) {
+  if (sessionLoading || (!initialLoaded && permissions.receivers.view)) {
     return <ReceiversSkeleton />;
+  }
+
+  if (!permissions.receivers.view) {
+    return (
+      <div className="max-w-5xl mx-auto pt-6">
+        <EmptyState title="Access restricted" body="Your role does not include Receivers access." />
+      </div>
+    );
   }
 
   // Nothing read at all yet: say so rather than rendering "0 receivers", which
@@ -302,30 +315,29 @@ export default function ReceiversPage() {
       </div>
 
       {showFilters && (
-        <div className="animate-rise-in rounded border border-hairline bg-card p-4">
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 lg:items-end">
-            <label className="block">
+        <div className="animate-rise-in rounded-lg border border-hairline bg-card p-4 shadow-panel">
+          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-12 xl:items-end">
+            <div className="min-w-0 xl:col-span-3">
               <span className="mb-2 block font-mono text-eyebrow font-semibold uppercase text-ink-mute">
                 Sender SIM
               </span>
-              <select
+              <Select
+                aria-label="Filter by sender SIM"
                 value={senderFilter}
-                onChange={(e) => {
-                  setSenderFilter(e.target.value);
+                onValueChange={(val) => {
+                  setSenderFilter(val);
                   setPage(1);
                 }}
-                className="h-10 sm:h-8 w-full rounded border border-hairline bg-card px-2 text-xs text-ink transition-colors focus:border-brass focus:outline-none focus:ring-1 focus:ring-brass"
-              >
-                <option value="">All senders</option>
-                {senders.map((p) => (
-                  <option key={p} value={p}>
-                    {fmtPhoneGrouped(p)}
-                  </option>
-                ))}
-              </select>
-            </label>
+                mono
+                className="w-full"
+                options={[
+                  { value: "", label: "All senders" },
+                  ...senders.map((p) => ({ value: p, label: fmtPhoneGrouped(p) })),
+                ]}
+              />
+            </div>
 
-            <label className="block">
+            <label className="block min-w-0 xl:col-span-3">
               <span className="mb-2 block font-mono text-eyebrow font-semibold uppercase text-ink-mute">
                 Min received (Ks)
               </span>
@@ -342,7 +354,7 @@ export default function ReceiversPage() {
               />
             </label>
 
-            <label className="block">
+            <label className="block min-w-0 xl:col-span-2">
               <span className="mb-2 block font-mono text-eyebrow font-semibold uppercase text-ink-mute">
                 Min transfers
               </span>
@@ -359,7 +371,7 @@ export default function ReceiversPage() {
               />
             </label>
 
-            <div>
+            <div className="min-w-0 xl:col-span-4">
               <span className="mb-2 block font-mono text-eyebrow font-semibold uppercase text-ink-mute">
                 Sort by
               </span>

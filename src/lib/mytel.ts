@@ -55,6 +55,13 @@ export interface BalanceInfo {
   mainAmount: number;
 }
 
+export interface AccountDetailInfo {
+  billExpireAt: string | null;
+  blockOneWay: string | null;
+  blockTwoWay: string | null;
+  currentStatus: string | null;
+}
+
 function getProxyAgent(): any {
   const proxyUrl =
     process.env.MYTEL_PROXY_URL ||
@@ -429,6 +436,33 @@ export async function getBalance(
     msisdn: first.msisdn ?? msisdn,
     subId: first.subId ?? "",
     mainAmount: Number(main),
+  };
+}
+
+/** Get SIM general account details including balance expiry and block dates. */
+export async function getAccountDetail(
+  token: string,
+  subscriptionId: string
+): Promise<AccountDetailInfo | null> {
+  if (!subscriptionId || /[/?#\\]/.test(subscriptionId)) return null;
+  const res = await fetchWithTimeout(
+    `${API_BASE}/account-detail/api/v1.1/individual/${encodeURIComponent(subscriptionId)}/account-detail`,
+    {
+      method: "GET",
+      headers: headers(token),
+      query: { language: "EN" },
+    }
+  );
+  const data = await json<ApiResult<{ generalInfo?: any }>>(res);
+  if (!apiOk(data.errorCode) || !data.result?.generalInfo) return null;
+  const info = data.result.generalInfo;
+  const pick = (v: unknown): string | null =>
+    typeof v === "string" && v.trim() ? v.trim() : null;
+  return {
+    billExpireAt: pick(info.mainBalance?.expireTime),
+    blockOneWay: pick(info.blockOneWay),
+    blockTwoWay: pick(info.blockTwoWay),
+    currentStatus: pick(info.currentStatus),
   };
 }
 

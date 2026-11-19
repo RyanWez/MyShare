@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
+import { invalidateCache } from "@/lib/api";
 
 // 1 hour in milliseconds
 const INACTIVITY_LIMIT = 60 * 60 * 1000;
@@ -19,6 +20,7 @@ export function InactivityProvider({ children }: { children: React.ReactNode }) 
         try {
           await fetch("/api/auth/logout", { method: "POST" });
         } catch {}
+        invalidateCache();
         window.location.assign("/login");
       }, INACTIVITY_LIMIT);
     }

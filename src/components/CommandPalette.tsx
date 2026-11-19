@@ -6,6 +6,7 @@ import { useTheme } from "next-themes";
 import {
   CornerDownLeft,
   Gauge,
+  IdCard,
   LogOut,
   Moon,
   ScrollText,
@@ -13,10 +14,13 @@ import {
   Send,
   SquareStack,
   Sun,
+  UserCog,
   Users,
   type LucideIcon,
 } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/Dialog";
+import { useSession } from "@/components/SessionProvider";
+import { OPEN_LOGOUT_CONFIRM } from "@/components/TopBar";
 import { cn } from "@/lib/utils";
 
 /** Window event that opens the palette from anywhere (e.g. the top-bar button). */
@@ -40,6 +44,7 @@ export function CommandPalette() {
   const [active, setActive] = React.useState(0);
   const router = useRouter();
   const { resolvedTheme, setTheme } = useTheme();
+  const { permissions } = useSession();
   const listRef = React.useRef<HTMLDivElement>(null);
 
   React.useEffect(() => {
@@ -62,14 +67,30 @@ export function CommandPalette() {
 
   const go = (href: string) => () => router.push(href);
 
-  // Rebuilt per dependency change on purpose: the theme entry tracks resolvedTheme.
-  const items: Item[] = React.useMemo(
-    () => [
-      { id: "nav-overview", label: "Overview", keywords: "dashboard home stats balance", icon: Gauge, run: go("/") },
-      { id: "nav-transfer", label: "New transfer", keywords: "send money myshare otp receiver", icon: Send, run: go("/transfer") },
-      { id: "nav-receivers", label: "Receivers", keywords: "contacts people numbers copy", icon: Users, run: go("/receivers") },
-      { id: "nav-sims", label: "SIM tray", keywords: "sim balance token login logout refresh", icon: SquareStack, run: go("/sims") },
-      { id: "nav-history", label: "History", keywords: "log transfers failed success export csv", icon: ScrollText, run: go("/history") },
+  const items: Item[] = React.useMemo(() => {
+    const out: Item[] = [];
+    if (permissions.overview.view) {
+      out.push({ id: "nav-overview", label: "Overview", keywords: "dashboard home stats balance", icon: Gauge, run: go("/") });
+    }
+    if (permissions.transfer.view) {
+      out.push({ id: "nav-transfer", label: "New transfer", keywords: "send money myshare otp receiver", icon: Send, run: go("/transfer") });
+    }
+    if (permissions.receivers.view) {
+      out.push({ id: "nav-receivers", label: "Receivers", keywords: "contacts people numbers copy", icon: Users, run: go("/receivers") });
+    }
+    if (permissions.sims.view) {
+      out.push({ id: "nav-sims", label: "SIM tray", keywords: "sim balance token login logout refresh expire", icon: SquareStack, run: go("/sims") });
+    }
+    if (permissions.history.view) {
+      out.push({ id: "nav-history", label: "History", keywords: "log transfers failed success export csv", icon: ScrollText, run: go("/history") });
+    }
+    if (permissions.users.manage) {
+      out.push({ id: "nav-users", label: "Users", keywords: "user management staff rex accounts", icon: UserCog, run: go("/users") });
+    }
+    if (permissions.roles.manage) {
+      out.push({ id: "nav-roles", label: "Role permission", keywords: "roles rbac permissions access", icon: IdCard, run: go("/roles") });
+    }
+    out.push(
       {
         id: "action-theme",
         label: resolvedTheme === "dark" ? "Switch to light theme" : "Switch to dark theme",
@@ -83,15 +104,13 @@ export function CommandPalette() {
         keywords: "sign out session end",
         icon: LogOut,
         run: () => {
-          void fetch("/api/auth/logout", { method: "POST" }).finally(() =>
-            window.location.assign("/login")
-          );
+          window.dispatchEvent(new Event(OPEN_LOGOUT_CONFIRM));
         },
-      },
-    ],
+      }
+    );
+    return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- `go` is a stable closure factory over router
-    [router, resolvedTheme, setTheme]
-  );
+  }, [router, resolvedTheme, setTheme, permissions]);
 
   const filtered = React.useMemo(() => {
     const q = query.trim().toLowerCase();

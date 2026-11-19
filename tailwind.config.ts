@@ -56,12 +56,12 @@ const config: Config = {
         xl: "10px",
       },
       ringOffsetColor: {
-        DEFAULT: "#F2F0EC",
+        DEFAULT: "rgb(var(--substrate))",
       },
       boxShadow: {
-        panel: "0 1px 2px rgba(20, 22, 26, 0.04)",
-        lift: "0 2px 10px rgba(20, 22, 26, 0.08)",
-        dialog: "0 16px 48px rgba(20, 22, 26, 0.18)",
+        panel: "0 1px 2px rgba(10, 14, 24, 0.06), 0 0 0 1px rgba(255, 255, 255, 0.02) inset",
+        lift: "0 6px 20px -4px rgba(10, 14, 24, 0.16), 0 2px 6px -1px rgba(10, 14, 24, 0.08)",
+        dialog: "0 18px 48px -8px rgba(6, 10, 20, 0.42), 0 4px 16px -4px rgba(6, 10, 20, 0.2)",
       },
       keyframes: {
         // Entrances settle at `transform: none` — a lingering translateY(0)/scale(1)

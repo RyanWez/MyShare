@@ -1,6 +1,7 @@
 import Shell from "@/components/Shell";
 import Toasts from "@/components/Toasts";
 import { InactivityProvider } from "@/components/InactivityProvider";
+import { SessionProvider } from "@/components/SessionProvider";
 
 /**
  * Dashboard-only chrome. The login page lives outside this group so it renders
@@ -11,8 +12,10 @@ export default function DashboardLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <InactivityProvider>
-      <Shell>{children}</Shell>
-      <Toasts />
+      <SessionProvider>
+        <Shell>{children}</Shell>
+        <Toasts />
+      </SessionProvider>
     </InactivityProvider>
   );
 }

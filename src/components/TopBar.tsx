@@ -3,18 +3,30 @@
 import * as React from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { BellOff, BellRing, LogOut, Menu, Plus, Search } from "lucide-react";
+import { BellOff, BellRing, Layers, LogOut, Menu, Plus, Search } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/Button";
+import { Select } from "@/components/ui/Select";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/Dialog";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import InstallButton from "@/components/InstallButton";
 import { OPEN_COMMAND_PALETTE } from "@/components/CommandPalette";
+
+export const OPEN_LOGOUT_CONFIRM = "myshare:open-logout-confirm";
+import { useSession } from "@/components/SessionProvider";
+import { invalidateCache } from "@/lib/api";
 import {
   chime,
   disableNotifs,
   enableNotifs,
   notifEnabled,
-  notifPermission,
   notifSupported,
 } from "@/lib/notifications";
 import { cn } from "@/lib/utils";
@@ -22,20 +34,24 @@ import { cn } from "@/lib/utils";
 const PAGES: Record<string, { title: string; sub: string }> = {
   "/": { title: "Overview", sub: "Balances, daily capacity, and today's transfers" },
   "/transfer": { title: "New transfer", sub: "Send balance from one SIM to any Mytel number" },
-  "/sims": { title: "SIM tray", sub: "Logged-in SIMs and how long each token has left" },
+  "/sims": { title: "SIM tray", sub: "Logged-in SIMs, bill expiry, and token life" },
   "/history": { title: "History", sub: "Every transfer this console has attempted" },
   "/receivers": { title: "Receivers", sub: "Numbers this console has sent to, grouped by total" },
+  "/users": { title: "Users", sub: "Manage operator accounts and Rex categories" },
+  "/roles": { title: "Role permission", sub: "Configure page and widget access per role" },
 };
 
-/** The only place a page title appears — pages start straight into content. */
+const REX_FILTER_ROUTES = new Set(["/", "/transfer", "/sims", "/history", "/receivers"]);
+
 export default function TopBar({ onMenu }: { onMenu: () => void }) {
   const pathname = usePathname();
   const router = useRouter();
+  const { user, permissions, rexGroups, rexFilter, setRexFilter } = useSession();
   const page = PAGES[pathname] ?? { title: "MyShare", sub: "" };
-  // Feedback for the round-trip — a slow link must not look like a dead one.
+  const [logoutConfirmOpen, setLogoutConfirmOpen] = React.useState(false);
   const [loggingOut, setLoggingOut] = React.useState(false);
+  const [scrolled, setScrolled] = React.useState(false);
 
-  // Background notifications: off by default, opted in via the bell.
   const [notifOn, setNotifOn] = React.useState(false);
   const [notifSupportedState, setNotifSupportedState] = React.useState(false);
   const [notifBusy, setNotifBusy] = React.useState(false);
@@ -43,6 +59,19 @@ export default function TopBar({ onMenu }: { onMenu: () => void }) {
   React.useEffect(() => {
     setNotifSupportedState(notifSupported());
     setNotifOn(notifEnabled());
+  }, []);
+
+  React.useEffect(() => {
+    const onOpenLogout = () => setLogoutConfirmOpen(true);
+    window.addEventListener(OPEN_LOGOUT_CONFIRM, onOpenLogout);
+    return () => window.removeEventListener(OPEN_LOGOUT_CONFIRM, onOpenLogout);
+  }, []);
+
+  React.useEffect(() => {
+    const onScroll = () => setScrolled(window.scrollY > 4);
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
   async function toggleNotifications() {
@@ -58,7 +87,7 @@ export default function TopBar({ onMenu }: { onMenu: () => void }) {
       const result = await enableNotifs();
       setNotifOn(notifEnabled());
       if (result === "enabled") {
-        chime(true); // audible confirmation of the exact sound to expect
+        chime(true);
         toast.success("Background notifications on — alerts while the tab is hidden");
       } else {
         toast.error("Notification permission denied — allow it from this site in your browser settings");
@@ -74,13 +103,24 @@ export default function TopBar({ onMenu }: { onMenu: () => void }) {
     try {
       await fetch("/api/auth/logout", { method: "POST" });
     } finally {
+      invalidateCache();
       router.replace("/login");
       router.refresh();
     }
   }
 
+  const showRexSelector =
+    permissions.rex.viewAll && REX_FILTER_ROUTES.has(pathname) && rexGroups.length > 0;
+
   return (
-    <header className="sticky top-0 z-30 flex min-h-[70px] transform-gpu flex-col justify-center border-b border-hairline bg-substrate/70 backdrop-blur-[8px]">
+    <header
+      className={cn(
+        "sticky top-0 z-30 flex min-h-[70px] flex-col justify-center border-b transition-[background-color,border-color,box-shadow] duration-200",
+        scrolled
+          ? "border-hairline-strong/80 bg-substrate/95 backdrop-blur-md shadow-lift"
+          : "border-hairline bg-substrate"
+      )}
+    >
       <div className="flex items-center gap-3 px-4 py-2 sm:gap-4 sm:px-5 md:px-8">
         <Button
           variant="ghost"
@@ -93,18 +133,42 @@ export default function TopBar({ onMenu }: { onMenu: () => void }) {
         </Button>
 
         <div className="min-w-0 flex-1">
-          <h1 className="truncate font-mono text-[13px] font-semibold uppercase tracking-[0.12em] text-ink">
-            {page.title}
-          </h1>
-          {/* Hidden rather than truncated on narrow screens — a subtitle clipped
-              mid-word reads as a layout fault, and the title already says enough. */}
+          <div className="flex items-center gap-2">
+            <h1 className="truncate font-mono text-[13px] font-semibold uppercase tracking-[0.12em] text-ink">
+              {page.title}
+            </h1>
+            {user?.rexName && !permissions.rex.viewAll && (
+              <span className="hidden sm:inline-flex items-center rounded border border-brass/35 bg-brass-wash/70 px-1.5 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-brass-deep">
+                {user.rexName}
+              </span>
+            )}
+          </div>
           {page.sub && (
             <p className="mt-0.5 hidden truncate text-xs text-ink-mute sm:block">{page.sub}</p>
           )}
         </div>
 
-        {/* gap-1 on phones: six controls must share the row with the title. */}
-        <div className="flex shrink-0 items-center gap-1 sm:gap-2">
+        <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
+          {showRexSelector && (
+            <div className="hidden md:flex items-center gap-1.5">
+              <Layers className="h-3.5 w-3.5 text-ink-mute" strokeWidth={1.75} aria-hidden="true" />
+              <Select
+                aria-label="Filter by Rex category"
+                value={rexFilter}
+                onValueChange={setRexFilter}
+                align="right"
+                triggerClassName="min-w-[130px] max-w-[170px]"
+                options={[
+                  { value: "all", label: "All Rex" },
+                  ...rexGroups.map((g) => ({
+                    value: String(g.id),
+                    label: `${g.name} (${g.sim_count ?? 0})`,
+                  })),
+                ]}
+              />
+            </div>
+          )}
+
           <Button
             variant="ghost"
             size="icon-sm"
@@ -143,12 +207,10 @@ export default function TopBar({ onMenu }: { onMenu: () => void }) {
           )}
           <InstallButton />
           <ThemeToggle />
-          {pathname !== "/transfer" && (
+          {pathname !== "/transfer" && permissions.transfer.execute && (
             <Button asChild size="sm" className="px-2.5 sm:px-3">
               <Link href="/transfer" aria-label="New transfer">
                 <Plus className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
-                {/* Icon-only on phones — the label alone would push the row
-                    past a 360px viewport. */}
                 <span className="hidden sm:inline">New transfer</span>
               </Link>
             </Button>
@@ -156,7 +218,7 @@ export default function TopBar({ onMenu }: { onMenu: () => void }) {
           <Button
             variant="ghost"
             size="icon-sm"
-            onClick={logout}
+            onClick={() => setLogoutConfirmOpen(true)}
             disabled={loggingOut}
             aria-label="Log out"
             title={loggingOut ? "Logging out…" : "Log out"}
@@ -168,6 +230,72 @@ export default function TopBar({ onMenu }: { onMenu: () => void }) {
           </Button>
         </div>
       </div>
+
+      {showRexSelector && (
+        <div className="flex items-center gap-2 border-t border-hairline/60 px-4 py-1.5 md:hidden">
+          <span className="font-mono text-[10px] font-semibold uppercase tracking-wider text-ink-mute">
+            Rex
+          </span>
+          <Select
+            aria-label="Filter by Rex category"
+            value={rexFilter}
+            onValueChange={setRexFilter}
+            className="flex-1"
+            options={[
+              { value: "all", label: "All Rex" },
+              ...rexGroups.map((g) => ({
+                value: String(g.id),
+                label: `${g.name} (${g.sim_count ?? 0})`,
+              })),
+            ]}
+          />
+        </div>
+      )}
+
+      <Dialog
+        open={logoutConfirmOpen}
+        onOpenChange={(open) => {
+          if (!loggingOut) setLogoutConfirmOpen(open);
+        }}
+      >
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Log out of MyShare?</DialogTitle>
+            <DialogDescription>
+              {user ? (
+                <>
+                  You are signed in as{" "}
+                  <span className="font-mono font-medium text-ink">{user.username}</span>{" "}
+                  ({user.roleName} · {user.rexName ?? "All Rex"}). You will need your password and
+                  2FA code to sign back in.
+                </>
+              ) : (
+                "Your current session will end and you will be returned to the login screen."
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="ghost"
+              autoFocus
+              disabled={loggingOut}
+              onClick={() => setLogoutConfirmOpen(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              loading={loggingOut}
+              onClick={logout}
+            >
+              <LogOut className="h-3.5 w-3.5" strokeWidth={1.75} aria-hidden="true" />
+              Confirm Log Out
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </header>
   );
 }

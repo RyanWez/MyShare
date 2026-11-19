@@ -1,23 +1,18 @@
 /**
- * Minimal password gate for the console.
+ * Session signing & Edge-compatible verification for the multi-user console.
  *
- * The dashboard stores live SIM tokens, so it must never be reachable without a
- * session. Design:
- * - One shared operator password from the `AUTH_PASSWORD` env var.
- * - Login sets an httpOnly cookie holding `expiry.hmac`; the HMAC is keyed with
- *   `AUTH_SECRET`, so a cookie can't be forged or extended without the secret.
- * - `src/middleware.ts` checks the cookie on every page and API route.
- *
- * Uses the Web Crypto API (async) so the same code runs in the Edge middleware
- * runtime and in Node route handlers.
- *
- * In production the gate FAILS CLOSED: if `AUTH_PASSWORD` is missing, nothing
- * gets in (the login page explains why). In dev (`next dev`) a missing password
- * leaves the console open, matching the old local-only workflow.
+ * Uses the Web Crypto API (async) so the exact same verification logic runs in
+ * Edge middleware (`src/middleware.ts`) and in Node route handlers.
  */
 
 export const SESSION_COOKIE = "myshare_session";
 const SESSION_TTL_SEC = 7 * 24 * 60 * 60; // 7 days
+
+export interface ParsedSession {
+  userId: number;
+  tokenVersion: number;
+  exp: number;
+}
 
 function toHex(buf: ArrayBuffer): string {
   return Array.from(new Uint8Array(buf))
@@ -54,14 +49,13 @@ export function isProduction(): boolean {
   return process.env.NODE_ENV === "production";
 }
 
-/** True when the password gate is armed (a password is configured). */
+/** True when authentication is armed (env password or DB configured). */
 export function authEnabled(): boolean {
-  return Boolean(process.env.AUTH_PASSWORD);
+  return Boolean(process.env.AUTH_PASSWORD || process.env.DATABASE_URL);
 }
 
 /**
- * In production a missing password must lock the console down rather than open
- * it up — an unauthenticated token console on the public internet is a leak.
+ * In production or whenever auth/DB is configured, every route requires a session.
  */
 export function authRequired(): boolean {
   return authEnabled() || isProduction();
@@ -70,7 +64,6 @@ export function authRequired(): boolean {
 export async function verifyPassword(candidate: string): Promise<boolean> {
   const expected = process.env.AUTH_PASSWORD;
   if (!expected) return false;
-  // Compare digests, not raw strings, so length differences don't short-circuit.
   return safeEqual(await sha256Hex(candidate), await sha256Hex(expected));
 }
 
@@ -78,32 +71,52 @@ function secret(): string | null {
   const s = process.env.AUTH_SECRET;
   const totpSuffix = process.env.AUTH_TOTP_SECRET || "";
   if (s) return s + totpSuffix;
-  // Dev convenience only — production refuses to mint cookies without a secret.
   if (!isProduction()) return "dev-insecure-secret" + totpSuffix;
   return null;
 }
 
-/** Build a signed session value: `<expiryUnixSeconds>.<hmac>` */
-export async function createSessionValue(): Promise<string | null> {
+/** Build a signed session value: `<userId>.<tokenVersion>.<expUnixSec>.<hmac>` */
+export async function createSessionValue(
+  userId: number,
+  tokenVersion: number
+): Promise<string | null> {
   const s = secret();
   if (!s) return null;
   const exp = Math.floor(Date.now() / 1000) + SESSION_TTL_SEC;
-  return `${exp}.${await hmacHex(s, String(exp))}`;
+  const payload = `${userId}.${tokenVersion}.${exp}`;
+  return `${payload}.${await hmacHex(s, payload)}`;
+}
+
+export async function parseSessionCookie(
+  value: string | undefined | null
+): Promise<ParsedSession | null> {
+  if (!value) return null;
+  const parts = value.split(".");
+  if (parts.length !== 4) return null;
+  const [userIdRaw, tvRaw, expRaw, sig] = parts;
+  const userId = Number(userIdRaw);
+  const tokenVersion = Number(tvRaw);
+  const exp = Number(expRaw);
+  if (
+    !Number.isInteger(userId) ||
+    userId <= 0 ||
+    !Number.isInteger(tokenVersion) ||
+    tokenVersion <= 0 ||
+    !Number.isFinite(exp)
+  ) {
+    return null;
+  }
+  if (exp < Math.floor(Date.now() / 1000)) return null;
+  const s = secret();
+  if (!s) return null;
+  const payload = `${userIdRaw}.${tvRaw}.${expRaw}`;
+  if (!safeEqual(sig, await hmacHex(s, payload))) return null;
+  return { userId, tokenVersion, exp };
 }
 
 export async function isSessionValid(value: string | undefined | null): Promise<boolean> {
-  if (!authRequired()) return true; // gate not armed (dev without a password)
-  if (!value) return false;
-  const dot = value.lastIndexOf(".");
-  if (dot <= 0) return false;
-  const expPart = value.slice(0, dot);
-  const sig = value.slice(dot + 1);
-  const exp = Number(expPart);
-  if (!Number.isFinite(exp)) return false;
-  if (exp < Math.floor(Date.now() / 1000)) return false;
-  const s = secret();
-  if (!s) return false; // production without AUTH_SECRET — stay closed
-  return safeEqual(sig, await hmacHex(s, expPart));
+  if (!authRequired()) return true;
+  return (await parseSessionCookie(value)) !== null;
 }
 
 export const sessionCookieOptions = {
@@ -121,5 +134,5 @@ export const clearedSessionCookieOptions = {
 
 /** Marker used by the login page to explain a misconfigured deployment. */
 export function missingPasswordInProduction(): boolean {
-  return isProduction() && !authEnabled();
+  return isProduction() && !process.env.AUTH_PASSWORD;
 }

@@ -3,23 +3,26 @@
 import * as React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Gauge, Send, SquareStack, ScrollText, X, ChevronLeft, ChevronRight, Users } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  Gauge,
+  IdCard,
+  ScrollText,
+  Send,
+  Settings,
+  SquareStack,
+  UserCog,
+  Users,
+  X,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import { StatusDot } from "@/components/ui/StatusDot";
 import { useLiveStatus, type LiveStatus } from "@/lib/liveEvents";
-import type { Stats } from "@/lib/types";
+import { useSession } from "@/components/SessionProvider";
+import { fetchSimsPage, fetchStats } from "@/lib/api";
 
-import { fetchStats } from "@/lib/api";
-
-const items = [
-  { href: "/", label: "Overview", icon: Gauge },
-  { href: "/transfer", label: "Transfer", icon: Send },
-  { href: "/sims", label: "SIM tray", icon: SquareStack },
-  { href: "/receivers", label: "Receivers", icon: Users },
-  { href: "/history", label: "History", icon: ScrollText },
-];
-
-/** How the shared SSE channel reads as an LED. */
 const liveLed: Record<LiveStatus, { tone: "signal" | "alert" | "muted"; pulse?: boolean; title: string }> = {
   online: { tone: "signal", title: "Live — connected" },
   connecting: { tone: "muted", title: "Connecting to live updates…" },
@@ -33,12 +36,6 @@ export interface SidebarProps {
   onToggleCollapse?: () => void;
 }
 
-/**
- * Direction-aware motion. Collapsing eases in-out so the rail eases away
- * instead of snapping; expanding rides a long decelerating wave. Exits are
- * quick, entrances overlap the width change — that overlap is what reads
- * as "smooth" instead of a sequence of steps.
- */
 const EASE_EXPAND = "cubic-bezier(0.22, 1, 0.36, 1)";
 const EASE_COLLAPSE = "cubic-bezier(0.45, 0.05, 0.25, 1)";
 
@@ -54,9 +51,6 @@ const padMotion = (collapsed: boolean): React.CSSProperties => ({
     : `padding 480ms ${EASE_EXPAND}, gap 480ms ${EASE_EXPAND}, color 150ms ease, background-color 150ms ease`,
 });
 
-/** A label that collapses to zero width instead of unmounting — the secret
- * behind the wave: elements stay put and flow, they never pop. Exits fade
- * fast; entrances cascade in on the expanding wave. */
 function RailLabel({
   collapsed,
   delay = 0,
@@ -64,7 +58,6 @@ function RailLabel({
   children,
 }: {
   collapsed: boolean;
-  /** Stagger (ms) for the expand wave; collapse always rushes together. */
   delay?: number;
   className?: string;
   children: React.ReactNode;
@@ -73,7 +66,7 @@ function RailLabel({
     <span
       className={cn(
         "overflow-hidden whitespace-nowrap",
-        collapsed ? "max-w-0 -translate-x-2 opacity-0" : "max-w-[140px] translate-x-0 opacity-100",
+        collapsed ? "max-w-0 -translate-x-2 opacity-0" : "max-w-[155px] translate-x-0 opacity-100",
         className
       )}
       style={{
@@ -89,37 +82,53 @@ function RailLabel({
 
 export default function Sidebar({ open, onClose, collapsed = false, onToggleCollapse }: SidebarProps) {
   const pathname = usePathname();
+  const { user, permissions, rexFilter } = useSession();
   const [fleet, setFleet] = React.useState<{ total: number; active: number } | null>(null);
+  const [userMenuOpen, setUserMenuOpen] = React.useState(true);
   const liveStatus = useLiveStatus();
   const led = liveLed[liveStatus];
 
-  // ---- Sliding active marker ---------------------------------------------
-  // One brass bar that glides between nav items instead of each item owning
-  // a marker that pops in and out — same device as the segmented-control pill,
-  // rotated vertical. Measured against the real DOM so it survives collapse,
-  // resize and font swaps.
+  const navItems = React.useMemo(() => {
+    const out = [];
+    if (permissions.overview.view) out.push({ href: "/", label: "Overview", icon: Gauge });
+    if (permissions.transfer.view) out.push({ href: "/transfer", label: "Transfer", icon: Send });
+    if (permissions.sims.view) out.push({ href: "/sims", label: "SIM tray", icon: SquareStack });
+    if (permissions.receivers.view) out.push({ href: "/receivers", label: "Receivers", icon: Users });
+    if (permissions.history.view) out.push({ href: "/history", label: "History", icon: ScrollText });
+    return out;
+  }, [permissions]);
+
+  const adminSubItems = React.useMemo(() => {
+    const out = [];
+    if (permissions.users.manage) out.push({ href: "/users", label: "Users", icon: UserCog });
+    if (permissions.roles.manage) out.push({ href: "/roles", label: "Role Permission", icon: IdCard });
+    return out;
+  }, [permissions]);
+
+  // Keep User Management expanded when visiting /users or /roles
+  React.useEffect(() => {
+    if (pathname.startsWith("/users") || pathname.startsWith("/roles")) {
+      setUserMenuOpen(true);
+    }
+  }, [pathname]);
+
   const navRef = React.useRef<HTMLElement>(null);
   const [marker, setMarker] = React.useState<{ top: number; height: number } | null>(null);
 
   const measureMarker = React.useCallback(() => {
     const nav = navRef.current;
     if (!nav) return;
-    const activeIdx = items.findIndex((it) =>
-      it.href === "/" ? pathname === "/" : pathname.startsWith(it.href)
-    );
-    const links = nav.querySelectorAll<HTMLElement>("a[data-nav]");
-    const el = activeIdx >= 0 ? links[activeIdx] : undefined;
+    const el = nav.querySelector<HTMLElement>("a[data-nav][data-active='true']");
     if (!el) {
       setMarker(null);
       return;
     }
-    // Inset by 4px top and bottom — the old marker's `inset-y-1` rhythm.
     setMarker({ top: el.offsetTop + 4, height: el.offsetHeight - 8 });
-  }, [pathname]);
+  }, []);
 
   React.useEffect(() => {
     measureMarker();
-  }, [measureMarker]);
+  }, [measureMarker, pathname, navItems, adminSubItems, userMenuOpen, collapsed]);
 
   React.useEffect(() => {
     const nav = navRef.current;
@@ -130,24 +139,33 @@ export default function Sidebar({ open, onClose, collapsed = false, onToggleColl
     return () => ro.disconnect();
   }, [measureMarker]);
 
-  // Uses deduplicated cached fetchStats so route navigation shares in-flight requests with Dashboard
   React.useEffect(() => {
+    if (!user) return;
     let alive = true;
-    fetchStats()
-      .then((d) => {
-        if (alive && d?.stats) {
-          setFleet({ total: d.stats.simCount, active: d.stats.loggedIn });
-        }
-      })
-      .catch(() => {});
+    if (permissions.overview.view) {
+      fetchStats(undefined, undefined, { rexId: rexFilter })
+        .then((d) => {
+          if (alive && d?.stats) {
+            setFleet({ total: d.stats.simCount, active: d.stats.loggedIn });
+          }
+        })
+        .catch(() => {});
+    } else if (permissions.sims.view) {
+      fetchSimsPage({ page: 1, pageSize: 1, rexId: rexFilter })
+        .then((d) => {
+          if (alive && d?.counts) {
+            setFleet({ total: d.counts.all, active: d.counts.active });
+          }
+        })
+        .catch(() => {});
+    }
     return () => {
       alive = false;
     };
-  }, [pathname]);
+  }, [pathname, user, permissions, rexFilter]);
 
   return (
     <>
-      {/* Mobile scrim */}
       <div
         onClick={onClose}
         className={cn(
@@ -160,16 +178,15 @@ export default function Sidebar({ open, onClose, collapsed = false, onToggleColl
       <aside
         style={widthMotion(collapsed)}
         className={cn(
-          "fixed inset-y-0 left-0 z-50 flex shrink-0 flex-col bg-[#1A1D28] text-[#F2F5FC] border-r border-hairline/50 will-change-[width,transform] md:sticky md:top-0 md:h-screen md:translate-x-0",
+          "fixed inset-y-0 left-0 z-50 md:z-40 flex shrink-0 flex-col bg-[#0D101A] text-[#F4F7FE] border-r border-white/[0.08] will-change-[width,transform] md:translate-x-0",
           open ? "translate-x-0" : "-translate-x-full",
           collapsed ? "w-20" : "w-60"
         )}
       >
-        {/* Toggle Button */}
         {onToggleCollapse && (
           <button
             onClick={onToggleCollapse}
-            className="absolute -right-3 top-12 z-50 hidden md:flex h-6 w-6 items-center justify-center rounded-full border border-white/10 bg-[#1c1f26] text-white shadow-sm transition-transform hover:scale-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brass"
+            className="absolute -right-3 top-[58px] z-50 hidden md:flex h-6 w-6 items-center justify-center rounded-full border border-white/15 bg-[#151A28] text-white/80 shadow-lift transition-all hover:scale-110 hover:border-brass/60 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brass"
             aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
           >
             {collapsed ? (
@@ -181,8 +198,6 @@ export default function Sidebar({ open, onClose, collapsed = false, onToggleColl
         )}
 
         <div className={cn("flex min-h-[70px] items-center border-b border-white/10 px-5", collapsed && "px-4")}>
-          {/* Brand crossfades to the MS monogram — both stay mounted, so the
-              swap reads as one continuous morph rather than a replacement. */}
           <div className="relative h-5 min-w-0 flex-1">
             <div
               className={cn(
@@ -222,16 +237,15 @@ export default function Sidebar({ open, onClose, collapsed = false, onToggleColl
         </div>
 
         <nav ref={navRef} className="relative flex-1 overflow-y-auto overflow-x-hidden py-3">
-          {/* The shared marker — glides to whichever link is active. */}
           <span
             aria-hidden="true"
             className={cn(
-              "absolute left-0 w-[2px] rounded-r bg-brass transition-[top,height] duration-300 ease-out",
+              "absolute left-0 w-[2px] rounded-r bg-brass transition-[top,height,opacity] duration-300 ease-out",
               !marker && "opacity-0"
             )}
             style={{ top: marker?.top ?? 0, height: marker?.height ?? 0 }}
           />
-          {items.map((it, i) => {
+          {navItems.map((it, i) => {
             const active = it.href === "/" ? pathname === "/" : pathname.startsWith(it.href);
             const Icon = it.icon;
             return (
@@ -239,26 +253,26 @@ export default function Sidebar({ open, onClose, collapsed = false, onToggleColl
                 key={it.href}
                 href={it.href}
                 data-nav
+                data-active={active ? "true" : "false"}
                 onClick={onClose}
                 title={collapsed ? it.label : undefined}
                 aria-current={active ? "page" : undefined}
                 style={padMotion(collapsed)}
                 className={cn(
                   "relative flex items-center py-2.5 font-mono text-eyebrow font-semibold uppercase focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brass",
-                  // The icon centers by gliding its padding to the exact offset
-                  // ((80 - 16) / 2 = 32px) — justify-content can't transition, so
-                  // a justify-center swap would teleport the icon every toggle.
                   collapsed ? "pl-8 pr-0" : "pl-5 pr-4",
-                  active ? "text-white bg-white/[0.08]" : "text-white/50 hover:text-white/90 hover:bg-white/[0.03]"
+                  active ? "text-white bg-white/[0.08]" : "text-white/55 hover:text-white/95 hover:bg-white/[0.04]"
                 )}
               >
-                {/* Icon in a fixed slot; the label hangs off it absolutely, so
-                    collapsing text can never push the icon around. */}
                 <span className="relative flex shrink-0">
-                  <Icon className="h-4 w-4" strokeWidth={1.5} aria-hidden="true" />
+                  <Icon
+                    className={cn("h-4 w-4 transition-colors", active && "text-brass")}
+                    strokeWidth={1.5}
+                    aria-hidden="true"
+                  />
                   <RailLabel
                     collapsed={collapsed}
-                    delay={100 + i * 45}
+                    delay={100 + i * 40}
                     className="absolute left-full top-1/2 ml-3 -translate-y-1/2"
                   >
                     {it.label}
@@ -267,12 +281,93 @@ export default function Sidebar({ open, onClose, collapsed = false, onToggleColl
               </Link>
             );
           })}
+
+          {adminSubItems.length > 0 && (
+            <div className="mt-3 border-t border-white/[0.07] pt-3">
+              {!collapsed && (
+                <button
+                  type="button"
+                  onClick={() => setUserMenuOpen((o) => !o)}
+                  aria-expanded={userMenuOpen}
+                  className="flex w-full items-center justify-between px-5 py-2 font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-white/45 transition-colors hover:text-white/85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brass"
+                >
+                  <span className="flex items-center gap-2.5">
+                    <Settings className="h-3.5 w-3.5 shrink-0" strokeWidth={1.5} aria-hidden="true" />
+                    <span>User Management</span>
+                  </span>
+                  <ChevronDown
+                    className={cn(
+                      "h-3.5 w-3.5 transition-transform duration-200",
+                      userMenuOpen && "rotate-180"
+                    )}
+                    strokeWidth={1.75}
+                  />
+                </button>
+              )}
+
+              {(collapsed || userMenuOpen) && (
+                <div className="space-y-0.5">
+                  {adminSubItems.map((it, i) => {
+                    const active = pathname.startsWith(it.href);
+                    const Icon = it.icon;
+                    return (
+                      <Link
+                        key={it.href}
+                        href={it.href}
+                        data-nav
+                        data-active={active ? "true" : "false"}
+                        onClick={onClose}
+                        title={collapsed ? it.label : undefined}
+                        aria-current={active ? "page" : undefined}
+                        style={padMotion(collapsed)}
+                        className={cn(
+                          "relative flex items-center py-2.5 font-mono text-eyebrow font-semibold uppercase focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brass",
+                          collapsed ? "pl-8 pr-0" : "pl-8 pr-4",
+                          active
+                            ? "text-white bg-white/[0.08]"
+                            : "text-white/55 hover:text-white/95 hover:bg-white/[0.04]"
+                        )}
+                      >
+                        <span className="relative flex shrink-0">
+                          <Icon
+                            className={cn("h-4 w-4 transition-colors", active && "text-brass")}
+                            strokeWidth={1.5}
+                            aria-hidden="true"
+                          />
+                          <RailLabel
+                            collapsed={collapsed}
+                            delay={120 + i * 40}
+                            className="absolute left-full top-1/2 ml-3 -translate-y-1/2"
+                          >
+                            {it.label}
+                          </RailLabel>
+                        </span>
+                      </Link>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
         </nav>
 
         <div
-          className={cn("border-t border-white/10 py-4", collapsed ? "px-0" : "px-5")}
+          className={cn("border-t border-white/10 py-3.5 space-y-2.5", collapsed ? "px-0" : "px-5")}
           style={{ transition: collapsed ? `padding 340ms ${EASE_COLLAPSE}` : `padding 480ms ${EASE_EXPAND}` }}
         >
+          {user && !collapsed && (
+            <div className="flex items-center justify-between gap-2 rounded bg-white/[0.04] px-2.5 py-2 border border-white/[0.06]">
+              <div className="min-w-0">
+                <div className="truncate font-mono text-[11px] font-semibold text-white">
+                  {user.username}
+                </div>
+                <div className="truncate font-mono text-[9.5px] uppercase tracking-wider text-white/50">
+                  {user.roleName} · {user.rexName ?? (permissions.rex.viewAll ? "All Rex" : "Unassigned")}
+                </div>
+              </div>
+            </div>
+          )}
+
           <div
             className={cn(
               "flex items-center font-mono text-[10px] tracking-wider uppercase text-white/60",
@@ -281,8 +376,6 @@ export default function Sidebar({ open, onClose, collapsed = false, onToggleColl
             style={padMotion(collapsed)}
             title={led.title}
           >
-            {/* Same fixed-slot trick as the nav icons: a 16px box keeps the LED
-                on the identical glide path, whatever the dot's own size. */}
             <span className="relative flex h-4 w-4 shrink-0 items-center justify-center">
               <StatusDot tone={led.tone} size="sm" pulse={led.pulse} />
               <RailLabel

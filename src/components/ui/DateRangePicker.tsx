@@ -160,6 +160,7 @@ export function DateRangePicker({
     top: number;
     /** Room the panel is allowed to take, so it never has to overflow. */
     available: number;
+    openUp: boolean;
   } | null>(null);
 
   useEffect(() => setMounted(true), []);
@@ -203,9 +204,10 @@ export function DateRangePicker({
     const below = anchor.bottom + PANEL_GAP;
     const fitsBelow = below + height <= window.innerHeight - VIEWPORT_MARGIN;
     const above = anchor.top - PANEL_GAP - height;
-    const top = fitsBelow || above < VIEWPORT_MARGIN ? below : above;
+    const openUp = !(fitsBelow || above < VIEWPORT_MARGIN);
+    const top = openUp ? above : below;
 
-    setPlacement({ left, top, available });
+    setPlacement({ left, top, available, openUp });
   }, [align, measureBounds]);
 
   /**
@@ -520,7 +522,14 @@ export function DateRangePicker({
               // flashes at the top-left corner on the way to its real place.
               visibility: placement ? "visible" : "hidden",
             }}
-            className="fixed z-[60] max-h-[calc(100vh-1rem)] overflow-auto rounded-lg border border-hairline bg-card p-4 shadow-2xl animate-rise-in"
+            className={cn(
+              "fixed z-[60] max-h-[calc(100vh-1rem)] overflow-auto rounded-lg border border-hairline bg-card p-4 shadow-2xl transition-none pointer-events-auto will-change-[transform,opacity]",
+              placement
+                ? placement.openUp
+                  ? "origin-bottom dropdown-wave-in-up"
+                  : "origin-top dropdown-wave-in-down"
+                : ""
+            )}
           >
           {/* Quick Presets Bar */}
           <div className="flex flex-wrap items-center gap-1.5 pb-3.5 mb-3.5 border-b border-hairline">

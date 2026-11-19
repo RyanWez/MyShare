@@ -3,49 +3,58 @@
 @tailwind utilities;
 
 :root {
-  --substrate: 242 240 236;
-  --card: 251 250 248;
-  --ink: 20 22 26;
-  --ink-soft: 74 78 86;
-  --ink-mute: 124 129 139;
-  --ink-faint: 169 173 181;
-  --brass: 200 155 60;
-  --brass-deep: 168 127 40;
-  --brass-wash: 245 238 221;
-  --signal: 0 197 102;
-  --signal-deep: 0 168 85;
-  --signal-wash: 226 247 236;
-  --alert: 255 59 48;
-  --alert-deep: 222 42 32;
-  --alert-wash: 255 233 231;
-  --hairline: 220 216 209;
-  --hairline-strong: 199 194 185;
+  color-scheme: light;
+  --substrate: 244 242 238;
+  --card: 255 255 253;
+  --ink: 18 22 30;
+  --ink-soft: 66 74 88;
+  --ink-mute: 112 120 136;
+  --ink-faint: 158 164 176;
+  --brass: 204 148 34;
+  --brass-deep: 162 112 16;
+  --brass-wash: 250 241 218;
+  --signal: 12 178 104;
+  --signal-deep: 5 138 78;
+  --signal-wash: 224 247 236;
+  --alert: 234 56 64;
+  --alert-deep: 196 34 44;
+  --alert-wash: 254 232 234;
+  --hairline: 221 218 210;
+  --hairline-strong: 194 190 180;
+  --chart-sent: 5 138 78;
+  --chart-failed: 196 34 44;
+  --chart-volume: 162 112 16;
 }
 
 .dark {
-  --substrate: 34 38 52;
-  --card: 43 49 66;
-  --ink: 242 245 252;
-  --ink-soft: 196 204 222;
-  --ink-mute: 145 155 178;
-  --ink-faint: 102 112 136;
-  --brass: 240 196 86;
-  --brass-deep: 250 210 100;
-  --brass-wash: 62 53 28;
-  --signal: 34 197 94;
-  --signal-deep: 74 222 128;
-  --signal-wash: 26 54 40;
+  color-scheme: dark;
+  --substrate: 17 21 32;
+  --card: 26 32 48;
+  --ink: 244 247 254;
+  --ink-soft: 198 208 228;
+  --ink-mute: 144 156 184;
+  --ink-faint: 98 110 138;
+  --brass: 245 196 81;
+  --brass-deep: 253 218 122;
+  --brass-wash: 56 44 18;
+  --signal: 16 185 129;
+  --signal-deep: 52 211 153;
+  --signal-wash: 16 54 42;
   --alert: 244 63 94;
   --alert-deep: 251 113 133;
-  --alert-wash: 58 26 34;
-  --hairline: 55 63 84;
-  --hairline-strong: 76 86 112;
+  --alert-wash: 62 22 34;
+  --hairline: 42 50 72;
+  --hairline-strong: 64 76 108;
+  --chart-sent: 52 211 153;
+  --chart-failed: 251 113 133;
+  --chart-volume: 245 196 81;
 }
 
 @layer base {
   html {
-    /* Anchor and programmatic scrolls glide instead of teleporting. */
+    /* Anchor and programmatic scrolls glide instead of teleporting, and stay clear of the 70px sticky TopBar. */
     scroll-behavior: smooth;
+    scroll-padding-top: 84px;
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -141,19 +150,95 @@ html.theme-anim *::after {
   }
 }
 
-*::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+@supports not (scrollbar-color: auto) {
+  * {
+    scrollbar-width: auto;
+  }
+
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background: rgb(var(--hairline-strong));
+    border: 3px solid rgb(var(--substrate));
+    border-radius: 6px;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background: rgb(var(--ink-mute));
+  }
 }
 
-*::-webkit-scrollbar-thumb {
-  background: rgb(var(--hairline-strong));
-  border: 3px solid rgb(var(--substrate));
-  border-radius: 6px;
+/* Gentle liquid-wave dropdown animations — strictly compositor-only
+   (transform + opacity) so fixed left/top placement coordinates never animate. */
+@keyframes dropdown-wave-down {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, -8px, 0) scale3d(0.975, 0.91, 1);
+  }
+  65% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale3d(1, 1, 1);
+  }
 }
 
-*::-webkit-scrollbar-thumb:hover {
-  background: rgb(var(--ink-mute));
+@keyframes dropdown-wave-up {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 8px, 0) scale3d(0.975, 0.91, 1);
+  }
+  65% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale3d(1, 1, 1);
+  }
+}
+
+@keyframes dropdown-wave-out-down {
+  0% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale3d(1, 1, 1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(0, -5px, 0) scale3d(0.98, 0.94, 1);
+  }
+}
+
+@keyframes dropdown-wave-out-up {
+  0% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale3d(1, 1, 1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(0, 5px, 0) scale3d(0.98, 0.94, 1);
+  }
+}
+
+.dropdown-wave-in-down {
+  animation: dropdown-wave-down 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: dropdown-wave-down 280ms linear(0, 0.32 14%, 0.72 32%, 0.94 52%, 1.008 74%, 1) both;
+}
+
+.dropdown-wave-in-up {
+  animation: dropdown-wave-up 240ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: dropdown-wave-up 280ms linear(0, 0.32 14%, 0.72 32%, 0.94 52%, 1.008 74%, 1) both;
+}
+
+.dropdown-wave-out-down {
+  animation: dropdown-wave-out-down 150ms cubic-bezier(0.4, 0, 0.6, 1) both;
+}
+
+.dropdown-wave-out-up {
+  animation: dropdown-wave-out-up 150ms cubic-bezier(0.4, 0, 0.6, 1) both;
 }
 
 @media (prefers-reduced-motion: reduce) {

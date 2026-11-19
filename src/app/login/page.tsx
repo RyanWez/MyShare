@@ -2,18 +2,12 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Lock, ShieldAlert } from "lucide-react";
+import { Eye, EyeOff, Lock, ShieldAlert, User } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { ThemeToggle } from "@/components/ThemeToggle";
+import { invalidateCache } from "@/lib/api";
 
-/**
- * The only unauthenticated surface in the app. Posts to /api/auth/login, which
- * sets the httpOnly session cookie; the middleware then lets the browser in.
- *
- * useSearchParams requires a Suspense boundary at prerender time, so the form
- * is wrapped below.
- */
 export default function LoginPage() {
   return (
     <React.Suspense fallback={null}>
@@ -25,23 +19,22 @@ export default function LoginPage() {
 function LoginForm() {
   const router = useRouter();
   const params = useSearchParams();
+  const [username, setUsername] = React.useState("");
   const [password, setPassword] = React.useState("");
+  const [showPassword, setShowPassword] = React.useState(false);
   const [totpCode, setTotpCode] = React.useState("");
   const [totpRequired, setTotpRequired] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [locked, setLocked] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
-  // Set once the password checks out and the redirect is in flight — the
-  // button must NOT spring back to "Unlock" while a slow network works on
-  // navigation, or operators re-click thinking nothing happened.
   const [succeeded, setSucceeded] = React.useState(false);
-  const inputRef = React.useRef<HTMLInputElement>(null);
+  const usernameRef = React.useRef<HTMLInputElement>(null);
+  const passwordRef = React.useRef<HTMLInputElement>(null);
 
   React.useEffect(() => {
-    inputRef.current?.focus();
+    usernameRef.current?.focus();
   }, []);
 
-  // If the gate isn't armed (dev without AUTH_PASSWORD), skip straight in.
   React.useEffect(() => {
     let cancelled = false;
     fetch("/api/auth/login")
@@ -70,36 +63,35 @@ function LoginForm() {
       const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password, totpCode }),
+        body: JSON.stringify({ username: username.trim(), password, totpCode }),
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok && data.ok) {
         ok = true;
         setSucceeded(true);
-        // Only allow same-site relative destinations.
+        invalidateCache();
         const next = params.get("next");
         router.replace(next && next.startsWith("/") ? next : "/");
         router.refresh();
         return;
       }
       if (res.status === 503) {
-        // Server misconfiguration — retrying won't help.
         setLocked(true);
         setError(String(data?.error ?? "Server is not configured for login"));
       } else {
-        setError(String(data?.error ?? (totpRequired && data?.error?.includes('auth code') ? "Wrong auth code" : "Wrong password")));
-        if (data?.error?.includes('auth code')) {
+        const msg = String(data?.error ?? "Invalid credentials");
+        setError(msg);
+        if (msg.toLowerCase().includes("auth code")) {
           setTotpCode("");
         } else {
-          setPassword("");
-          inputRef.current?.focus();
+          // Keep the entered password so the operator can toggle visibility to inspect typos/autofill.
+          passwordRef.current?.focus();
+          passwordRef.current?.select();
         }
       }
     } catch {
       setError("Network error — try again");
     } finally {
-      // Hold the pending state through the redirect; only failures hand the
-      // button back.
       if (!ok) setBusy(false);
     }
   }
@@ -113,70 +105,125 @@ function LoginForm() {
       <div className="w-full max-w-sm">
         <div className="mb-8 text-center">
           <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-lg border border-hairline bg-card shadow-panel">
-            <Lock className="h-5 w-5 text-ink-soft" strokeWidth={1.75} />
+            <Lock className="h-5 w-5 text-brass" strokeWidth={1.75} />
           </div>
           <h1 className="font-mono text-[13px] font-semibold uppercase tracking-[0.12em] text-ink">
-            MyShare console
+            My<span className="text-brass">Share</span> console
           </h1>
           <p className="mt-1.5 text-sm text-ink-mute">
-            Enter the operator password to continue
+            Sign in with your assigned operator account
           </p>
         </div>
 
         <form
           onSubmit={onSubmit}
-          className="rounded-lg border border-hairline bg-card p-5 shadow-panel"
+          className="space-y-4 rounded-lg border border-hairline bg-card p-5 shadow-panel"
         >
           <Input
-            ref={inputRef}
+            ref={usernameRef}
+            id="login-username"
+            name="username"
+            label="Username"
+            type="text"
+            autoComplete="username"
+            spellCheck={false}
+            autoCapitalize="none"
+            autoCorrect="off"
+            enterKeyHint="next"
+            required
+            value={username}
+            onChange={(e) => {
+              setUsername(e.target.value);
+              if (error) setError(null);
+            }}
+            disabled={locked}
+            iconLeft={<User className="h-4 w-4" strokeWidth={1.75} />}
+            placeholder="MyShareAdmin"
+          />
+
+          <Input
+            ref={passwordRef}
+            id="login-password"
+            name="password"
             label="Password"
-            type="password"
+            type={showPassword ? "text" : "password"}
             autoComplete="current-password"
+            spellCheck={false}
+            autoCapitalize="none"
+            autoCorrect="off"
+            enterKeyHint={totpRequired ? "next" : "done"}
+            required
             value={password}
-            onChange={(e) => setPassword(e.target.value)}
+            onChange={(e) => {
+              setPassword(e.target.value);
+              if (error) setError(null);
+            }}
             disabled={locked}
             error={error ?? undefined}
             iconLeft={<Lock className="h-4 w-4" strokeWidth={1.75} />}
+            actionRight={
+              <button
+                type="button"
+                onClick={() => setShowPassword((s) => !s)}
+                aria-label={showPassword ? "Hide password" : "Show password"}
+                aria-pressed={showPassword}
+                className="flex h-8 w-8 items-center justify-center rounded text-ink-mute transition-colors hover:bg-substrate hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brass"
+              >
+                {showPassword ? (
+                  <EyeOff className="h-4 w-4" strokeWidth={1.75} aria-hidden="true" />
+                ) : (
+                  <Eye className="h-4 w-4" strokeWidth={1.75} aria-hidden="true" />
+                )}
+              </button>
+            }
             placeholder="••••••••"
           />
+
           {totpRequired && (
-            <div className="mt-4">
-              <Input
-                label="Google Auth Code"
-                type="text"
-                inputMode="numeric"
-                autoComplete="one-time-code"
-                value={totpCode}
-                onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, ""))}
-                disabled={locked}
-                placeholder="123456"
-                className="font-mono tracking-widest text-center"
-              />
-            </div>
+            <Input
+              id="login-totp"
+              name="one-time-code"
+              label="Google Auth Code"
+              type="text"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              spellCheck={false}
+              enterKeyHint="done"
+              required
+              maxLength={6}
+              value={totpCode}
+              onChange={(e) => {
+                setTotpCode(e.target.value.replace(/\D/g, "").slice(0, 6));
+                if (error) setError(null);
+              }}
+              disabled={locked}
+              placeholder="123456"
+              className="text-center font-mono tracking-widest"
+            />
           )}
+
           <Button
             type="submit"
-            className="mt-4 w-full"
+            className="w-full"
             loading={busy}
-            disabled={locked || succeeded || !password || (totpRequired && totpCode.length !== 6)}
+            disabled={
+              locked ||
+              succeeded ||
+              !username.trim() ||
+              !password ||
+              (totpRequired && totpCode.length < 6)
+            }
           >
-            {busy ? (succeeded ? "Opening…" : "Checking…") : "Unlock"}
+            {succeeded ? "Unlocking…" : "Sign in"}
           </Button>
 
           {locked && (
-            <div className="mt-4 flex items-start gap-2 rounded border border-alert/40 bg-alert/5 px-3 py-2.5 text-xs leading-relaxed text-ink-mute">
-              <ShieldAlert className="mt-px h-4 w-4 shrink-0 text-alert" strokeWidth={1.75} />
-              <span>
-                This deployment has no <code className="font-mono">AUTH_PASSWORD</code> set,
-                so the console stays locked. Set it in the server environment and redeploy.
-              </span>
+            <div className="flex items-start gap-2 rounded border border-alert/40 bg-alert-wash p-3 text-xs text-alert-deep">
+              <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>Set AUTH_PASSWORD and DATABASE_URL in .env to enable console login.</span>
             </div>
           )}
         </form>
-
-        <p className="mt-6 text-center text-xs text-ink-faint">
-          This console holds live SIM tokens — keep the password private.
-        </p>
       </div>
     </div>
   );

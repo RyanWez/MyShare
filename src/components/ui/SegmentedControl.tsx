@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 export interface SegmentedOption<T extends string> {
   value: T;
   label: string;
+  tone?: "default" | "warn" | "alert";
 }
 
 export interface SegmentedControlProps<T extends string> {
@@ -37,6 +38,8 @@ function SegmentedControl<T extends string>({
   const containerRef = React.useRef<HTMLDivElement>(null);
   const [pill, setPill] = React.useState<{ left: number; width: number } | null>(null);
 
+  const selectedOption = options.find((o) => o.value === value);
+
   const measure = React.useCallback(() => {
     const c = containerRef.current;
     if (!c) return;
@@ -63,13 +66,20 @@ function SegmentedControl<T extends string>({
     return () => ro.disconnect();
   }, [measure]);
 
+  const pillToneClass =
+    selectedOption?.tone === "alert"
+      ? "bg-alert"
+      : selectedOption?.tone === "warn"
+        ? "bg-brass"
+        : "bg-ink";
+
   return (
     <div
       ref={containerRef}
       role="tablist"
       aria-label={props["aria-label"]}
       className={cn(
-        "relative flex items-center gap-px rounded border border-hairline bg-hairline p-px",
+        "relative flex min-w-0 max-w-full items-center gap-px rounded border border-hairline bg-hairline p-px",
         fullWidth ? "w-full" : "inline-flex",
         className
       )}
@@ -77,13 +87,26 @@ function SegmentedControl<T extends string>({
       <span
         aria-hidden="true"
         className={cn(
-          "absolute bottom-px top-px rounded-sm bg-ink shadow-sm transition-[left,width] duration-200 ease-out",
+          "absolute bottom-px top-px rounded-sm shadow-sm transition-[left,width,background-color] duration-200 ease-out",
+          pillToneClass,
           !pill && "opacity-0"
         )}
         style={{ left: pill?.left ?? 0, width: pill?.width ?? 0 }}
       />
       {options.map((o) => {
         const selected = o.value === value;
+        const textClass = selected
+          ? o.tone === "alert"
+            ? "text-white"
+            : o.tone === "warn"
+              ? "text-substrate"
+              : "text-substrate"
+          : o.tone === "alert"
+            ? "text-alert-deep hover:text-alert"
+            : o.tone === "warn"
+              ? "text-brass-deep hover:text-brass"
+              : "text-ink-mute hover:text-ink";
+
         return (
           <button
             key={o.value}
@@ -93,14 +116,32 @@ function SegmentedControl<T extends string>({
             disabled={disabled}
             onClick={() => onValueChange(o.value)}
             className={cn(
-              "relative z-10 flex h-10 items-center justify-center rounded-sm px-3 py-2 font-mono text-eyebrow font-semibold uppercase transition-colors duration-150 sm:h-8 sm:py-1.5",
+              "relative z-10 flex h-10 shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-sm py-2 font-mono text-eyebrow font-semibold uppercase transition-colors duration-150 sm:h-8 sm:py-1.5",
+              fullWidth ? "min-w-0 flex-1 px-2" : "px-2.5",
               "focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brass",
-              selected ? "text-substrate" : "text-ink-mute hover:text-ink",
-              disabled && "cursor-not-allowed opacity-50",
-              fullWidth && "flex-1"
+              textClass,
+              disabled && "cursor-not-allowed opacity-50"
             )}
           >
-            {o.label}
+            {o.tone === "warn" && (
+              <span
+                aria-hidden="true"
+                className={cn(
+                  "h-1.5 w-1.5 shrink-0 rounded-full",
+                  selected ? "bg-substrate" : "bg-brass"
+                )}
+              />
+            )}
+            {o.tone === "alert" && (
+              <span
+                aria-hidden="true"
+                className={cn(
+                  "h-1.5 w-1.5 shrink-0 rounded-full",
+                  selected ? "bg-white" : "bg-alert"
+                )}
+              />
+            )}
+            <span className="truncate">{o.label}</span>
           </button>
         );
       })}

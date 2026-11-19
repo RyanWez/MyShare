@@ -1,9 +1,10 @@
 import type { NextRequest } from "next/server";
 import { dbApi } from "@/lib/db";
 import { parseTransfersFilter } from "@/lib/historyFilter";
+import { requireSession, resolveScopedRexId } from "@/lib/authz";
 
-// Hard ceiling so a pathological query can't pin the server; still far beyond
-// any realistic filter result.
+export const dynamic = "force-dynamic";
+
 const EXPORT_CAP = 100_000;
 
 const csvCell = (v: string | number | null | undefined) => {
@@ -11,25 +12,38 @@ const csvCell = (v: string | number | null | undefined) => {
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 };
 
-/**
- * Full CSV of every transfer matching the current filters — not just one page.
- * The History page's export button points here, so an archive download stays
- * complete regardless of pagination.
- */
 export async function GET(req: NextRequest) {
-  const { fromTs, toTs, status, q } = parseTransfersFilter(req);
+  const auth = await requireSession(req, (p) => p.history.view && p.history.export);
+  if (!auth.ok) return auth.response;
 
-  const { rows } = dbApi.listTransfersFiltered(
-    { fromTs, toTs, status, q: q || undefined },
+  const { fromTs, toTs, status, q } = parseTransfersFilter(req);
+  const rexId = resolveScopedRexId(auth.user, req.nextUrl.searchParams.get("rexId"));
+
+  const { rows } = await dbApi.listTransfersFiltered(
+    { fromTs, toTs, status, q: q || undefined, rexId },
     EXPORT_CAP,
     0
   );
 
-  const header = ["id", "datetime", "sender", "receiver", "amount", "fee", "status", "error_code", "message"];
+  const header = [
+    "id",
+    "datetime",
+    "rex",
+    "operator",
+    "sender",
+    "receiver",
+    "amount",
+    "fee",
+    "status",
+    "error_code",
+    "message",
+  ];
   const lines = rows.map((r) =>
     [
       r.id,
       new Date(r.created_at * 1000).toISOString(),
+      r.rex_name ?? "",
+      r.created_by_username ?? "",
       r.sender_phone,
       r.receiver_phone,
       r.amount,
@@ -42,7 +56,6 @@ export async function GET(req: NextRequest) {
       .join(",")
   );
 
-  // BOM so Excel opens the file as UTF-8 without an import wizard.
   const csv = "\uFEFF" + [header.join(","), ...lines].join("\r\n");
   const stamp = new Date().toISOString().slice(0, 10);
 

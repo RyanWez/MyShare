@@ -7,6 +7,7 @@ import {
   apiOk,
 } from "@/lib/mytel";
 import { dbApi } from "@/lib/db";
+import { canAccessSim, requireSession, resolveScopedRexId } from "@/lib/authz";
 
 /** What the client must do with the code once it arrives. */
 type Flow = "login" | "register";
@@ -32,7 +33,10 @@ const inFlight = new Set<string>();
  * OTP box; only the follow-up call differs.
  */
 export async function POST(req: NextRequest) {
-  const { phone } = await req.json();
+  const auth = await requireSession(req, (p) => p.sims.addLogin);
+  if (!auth.ok) return auth.response;
+
+  const { phone, rexId: rawRexId } = await req.json();
   if (!phone) return NextResponse.json({ ok: false, error: "phone required" }, { status: 400 });
 
   const msisdn = normalizeMsisdn(phone);
@@ -50,6 +54,18 @@ export async function POST(req: NextRequest) {
       { status: 400 }
     );
   }
+
+  const existingSim = await dbApi.getSim(msisdn);
+  if (existingSim && !canAccessSim(auth.user, existingSim)) {
+    return NextResponse.json(
+      { ok: false, error: "This SIM belongs to another Rex group" },
+      { status: 403 }
+    );
+  }
+  const targetRexId = resolveScopedRexId(
+    auth.user,
+    rawRexId !== undefined && rawRexId !== null ? String(rawRexId) : null
+  );
 
   if (inFlight.has(msisdn)) {
     return NextResponse.json({
@@ -71,7 +87,8 @@ export async function POST(req: NextRequest) {
       lastOtpAt.delete(msisdn);
     }
 
-    const send = async (dispatch: () => Promise<OtpAttempt>) => finish(msisdn, await dispatch());
+    const send = async (dispatch: () => Promise<OtpAttempt>) =>
+      await finish(msisdn, await dispatch(), targetRexId, auth.user.id);
 
     let state;
     let checkError: string | null = null;
@@ -164,7 +181,12 @@ async function sendRegisterOtp(msisdn: string): Promise<OtpAttempt> {
   }
 }
 
-function finish(msisdn: string, attempt: OtpAttempt) {
+async function finish(
+  msisdn: string,
+  attempt: OtpAttempt,
+  targetRexId: number | null,
+  actorUserId: number
+) {
   // Translate Mytel's raw validation message into something the toast can show directly.
   if (!attempt.ok && attempt.message?.includes("msisdnReq")) {
     attempt.message = `Invalid phone number format (${msisdn}, ${msisdn.length} digits). Use 09XXXXXXXXX or 959XXXXXXXXX.`;
@@ -180,9 +202,12 @@ function finish(msisdn: string, attempt: OtpAttempt) {
     // Re-logging in a SIM that is already working must not knock it back to
     // "waiting for OTP": if the operator abandons the dialog, a perfectly valid
     // token would sit in the tray looking logged out.
-    const existing = dbApi.getSim(msisdn);
+    const existing = await dbApi.getSim(msisdn);
     if (!existing || existing.status !== "active") {
-      dbApi.upsertSim(msisdn, { status: "otp_pending" });
+      await dbApi.upsertSim(msisdn, {
+        status: "otp_pending",
+        ...(!existing ? { rex_id: targetRexId, added_by_user_id: actorUserId } : {}),
+      });
     }
   }
   return NextResponse.json({

@@ -1,52 +1,29 @@
 #!/usr/bin/env node
 /**
- * Safe online backup of the SQLite database (WAL-safe, no lock needed).
- *
- * On the server (via Fly.io):
- *   flyctl ssh console -C "node scripts/backup-db.js"
- * then pull the file down:
- *   flyctl ssh sftp get /app/data/backups/<name>.db ./dashboard-backup.db
- *
- * Locally it works the same way from the project root:
- *   node scripts/backup-db.js
- *
- * Env overrides: DATA_DIR, BACKUP_DIR, BACKUP_KEEP (default 7).
+ * PostgreSQL backup reminder / pg_dump wrapper when DATABASE_URL is configured.
+ * Managed Aiven PostgreSQL handles automated backups; this script creates a
+ * local custom-format dump when `pg_dump` is installed.
  */
-const Database = require("better-sqlite3");
-const path = require("path");
+const { execFileSync } = require("child_process");
 const fs = require("fs");
+const path = require("path");
 
-const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), "data");
-const OUT_DIR = process.env.BACKUP_DIR || path.join(DATA_DIR, "backups");
-const src = path.join(DATA_DIR, "dashboard.db");
+if (fs.existsSync(".env")) {
+  for (const line of fs.readFileSync(".env", "utf8").split("\n")) {
+    const m = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+    if (m && !process.env[m[1]]) process.env[m[1]] = m[2];
+  }
+}
 
-if (!fs.existsSync(src)) {
-  console.error("No database found at", src);
+if (!process.env.DATABASE_URL) {
+  console.error("DATABASE_URL is not set.");
   process.exit(1);
 }
 
-fs.mkdirSync(OUT_DIR, { recursive: true });
+const outDir = process.env.BACKUP_DIR || path.join(process.cwd(), "data", "backups");
+fs.mkdirSync(outDir, { recursive: true });
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-const dest = path.join(OUT_DIR, `dashboard-${stamp}.db`);
+const dest = path.join(outDir, `myshare-${stamp}.dump`);
 
-const db = new Database(src, { readonly: true });
-db.backup(dest)
-  .then(() => {
-    console.log("Backup written:", dest);
-    // Keep only the newest N backups so the volume doesn't fill with old copies.
-    const keep = Number(process.env.BACKUP_KEEP || 7);
-    const files = fs
-      .readdirSync(OUT_DIR)
-      .filter((f) => f.startsWith("dashboard-") && f.endsWith(".db"))
-      .sort();
-    while (files.length > keep) {
-      const old = files.shift();
-      fs.unlinkSync(path.join(OUT_DIR, old));
-      console.log("Pruned old backup:", old);
-    }
-  })
-  .catch((err) => {
-    console.error("Backup failed:", err);
-    process.exitCode = 1;
-  })
-  .finally(() => db.close());
+execFileSync("pg_dump", ["-Fc", "-f", dest, process.env.DATABASE_URL], { stdio: "inherit" });
+console.log("Backup written:", dest);

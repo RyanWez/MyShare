@@ -47,6 +47,7 @@ export function TrendChart({
   className,
 }: TrendChartProps) {
   const wrapRef = React.useRef<HTMLDivElement>(null);
+  const gradPrefix = React.useId().replace(/:/g, "");
   const [width, setWidth] = React.useState(0);
   const [armed, setArmed] = React.useState(false);
   const [hover, setHover] = React.useState<number | null>(null);
@@ -183,6 +184,22 @@ export function TrendChart({
             onKeyDown={onKeyDown}
             className="block touch-none rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-ink"
           >
+            <defs>
+              {!multi &&
+                paths.map((p) => (
+                  <linearGradient
+                    key={`${p.key}-grad`}
+                    id={`${gradPrefix}-${p.key}`}
+                    x1="0"
+                    y1="0"
+                    x2="0"
+                    y2="1"
+                  >
+                    <stop offset="0%" stopColor={p.color} stopOpacity={0.26} />
+                    <stop offset="100%" stopColor={p.color} stopOpacity={0.0} />
+                  </linearGradient>
+                ))}
+            </defs>
             <g transform={`translate(${PAD.left},${PAD.top})`}>
               {yTicks.map((v) => (
                 <g key={v}>
@@ -223,7 +240,7 @@ export function TrendChart({
                 ) : null
               )}
 
-              {/* The wash is a single-series device: two overlapping 10% fills muddy
+              {/* The wash is a single-series device: two overlapping fills muddy
                   the region where the curves cross, so a multi-series chart is lines
                   only and the legend carries identity. */}
               {!multi &&
@@ -231,13 +248,13 @@ export function TrendChart({
                   <path
                     key={`${p.key}-area`}
                     d={p.area}
-                    fill={p.color}
+                    fill={`url(#${gradPrefix}-${p.key})`}
                     // Animated values go in `style`, not as attributes: a CSS transition
                     // needs the property set through the style origin to be sure it
                     // observes the change.
                     style={{
-                      fillOpacity: armed ? 0.1 : 0,
-                      transition: "fill-opacity 700ms ease-out 160ms",
+                      opacity: armed ? 1 : 0,
+                      transition: "opacity 700ms ease-out 160ms",
                     }}
                   />
                 ))}
@@ -248,7 +265,7 @@ export function TrendChart({
                   d={p.line}
                   fill="none"
                   stroke={p.color}
-                  strokeWidth={2}
+                  strokeWidth={2.25}
                   strokeLinecap="round"
                   strokeLinejoin="round"
                   // pathLength normalises the curve to 1 unit, so the wipe works

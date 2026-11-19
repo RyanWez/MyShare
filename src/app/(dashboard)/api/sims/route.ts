@@ -1,19 +1,114 @@
 import { NextRequest, NextResponse } from "next/server";
 import { dbApi } from "@/lib/db";
 import { normalizeMsisdn } from "@/lib/mytel";
+import { requireSession, resolveScopedRexId } from "@/lib/authz";
 
-export async function GET() {
-  const volumeToday = dbApi.todayVolumeBySender();
-  const volumeThisMonth = dbApi.thisMonthVolumeBySender();
-  const sims = dbApi.listSimsPublic().map((s) => ({
+export const dynamic = "force-dynamic";
+
+export async function GET(req: NextRequest) {
+  const auth = await requireSession(req, (p) => p.sims.view || p.transfer.view);
+  if (!auth.ok) return auth.response;
+
+  const q = req.nextUrl.searchParams;
+  const rexId = resolveScopedRexId(auth.user, q.get("rexId"));
+  const pageRaw = q.get("page");
+
+  // Paged mode (used by SIM Tray for 5,000+ SIM scale)
+  if (pageRaw !== null) {
+    const page = Math.max(1, Number(pageRaw) || 1);
+    const pageSize = Math.min(100, Math.max(1, Number(q.get("pageSize")) || 24));
+    const viewParam = q.get("view");
+    const view =
+      viewParam === "active" ||
+      viewParam === "inactive" ||
+      viewParam === "drained" ||
+      viewParam === "expiring" ||
+      viewParam === "expired"
+        ? viewParam
+        : "all";
+    const sortParam = q.get("sort");
+    const sort =
+      sortParam === "balance-asc" || sortParam === "balance-desc" || sortParam === "expiry-asc"
+        ? sortParam
+        : "recent";
+    const search = q.get("q") ?? "";
+
+    const paged = await dbApi.listSimsPaged({
+      rexId,
+      view,
+      q: search,
+      sort,
+      page,
+      pageSize,
+    });
+    return NextResponse.json({
+      ok: true,
+      sims: paged.sims,
+      total: paged.total,
+      counts: paged.counts,
+    });
+  }
+
+  // Unpaged mode (used by Transfer sender picker, optionally filtered to active)
+  const statusFilter = q.get("status") || undefined;
+  const simsRaw = await dbApi.listSimsPublic({ rexId, status: statusFilter, limit: 2000 });
+  const phones = simsRaw.map((s) => s.phone);
+  const [volumeToday, volumeThisMonth] =
+    phones.length > 0
+      ? await Promise.all([
+          dbApi.todayVolumeBySender(phones, rexId),
+          dbApi.thisMonthVolumeBySender(phones, rexId),
+        ])
+      : [{}, {}];
+
+  const sims = simsRaw.map((s) => ({
     ...s,
     volume_today: volumeToday[s.phone] ?? 0,
     volume_this_month: volumeThisMonth[s.phone] ?? 0,
   }));
-  return NextResponse.json({ ok: true, sims });
+  return NextResponse.json({ ok: true, sims, total: sims.length });
+}
+
+export async function PATCH(req: NextRequest) {
+  const auth = await requireSession(req, (p) => p.sims.moveRex && p.rex.viewAll);
+  if (!auth.ok) return auth.response;
+
+  const { phones, rexId } = await req.json();
+  if (!Array.isArray(phones) || phones.length === 0) {
+    return NextResponse.json({ ok: false, error: "phones required" }, { status: 400 });
+  }
+
+  let targetRexId: number | null = null;
+  if (rexId !== null && rexId !== undefined && rexId !== "") {
+    const parsed = Number(rexId);
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+      return NextResponse.json({ ok: false, error: "Invalid rexId" }, { status: 400 });
+    }
+    const group = await dbApi.getRexGroupById(parsed);
+    if (!group) {
+      return NextResponse.json({ ok: false, error: "Rex group not found" }, { status: 404 });
+    }
+    targetRexId = parsed;
+  }
+
+  const normalized = phones.map((p: string) => normalizeMsisdn(p));
+  const moved = await dbApi.moveSimsToRex(normalized, targetRexId);
+
+  await dbApi.addAuditLog({
+    actorUserId: auth.user.id,
+    actorUsername: auth.user.username,
+    action: "sims.move_rex",
+    targetType: "sims",
+    detail: { count: moved, targetRexId, phones: normalized.slice(0, 20) },
+  });
+
+  return NextResponse.json({ ok: true, moved });
 }
 
 export async function DELETE(req: NextRequest) {
+  const auth = await requireSession(req, (p) => p.sims.delete);
+  if (!auth.ok) return auth.response;
+
   const { phone, phones } = await req.json();
   const targets: string[] = [];
   if (phone) targets.push(phone);
@@ -22,8 +117,19 @@ export async function DELETE(req: NextRequest) {
   if (targets.length === 0)
     return NextResponse.json({ ok: false, error: "phone or phones required" }, { status: 400 });
 
-  // One transaction and one live push for the whole batch — clearing out drained
-  // SIMs would otherwise wake every open tab once per row.
-  const removed = dbApi.deleteSims(targets.map((p) => normalizeMsisdn(p)));
+  const normalized = targets.map((p) => normalizeMsisdn(p));
+  const scopedRexId = auth.user.permissions.rex.viewAll ? null : (auth.user.rex_id ?? -1);
+  const removed = await dbApi.deleteSims(normalized, scopedRexId);
+
+  if (removed > 0) {
+    await dbApi.addAuditLog({
+      actorUserId: auth.user.id,
+      actorUsername: auth.user.username,
+      action: "sims.delete",
+      targetType: "sims",
+      detail: { count: removed, phones: normalized.slice(0, 20) },
+    });
+  }
+
   return NextResponse.json({ ok: true, removed });
 }

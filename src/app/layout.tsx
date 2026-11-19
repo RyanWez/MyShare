@@ -37,9 +37,10 @@ export const metadata: Metadata = {
 
 // Chrome picks the title-bar / OS-chrome color from here; both themes covered.
 export const viewport: Viewport = {
+  colorScheme: "light dark",
   themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#F2F0EC" },
-    { media: "(prefers-color-scheme: dark)", color: "#222634" },
+    { media: "(prefers-color-scheme: light)", color: "#F4F2EE" },
+    { media: "(prefers-color-scheme: dark)", color: "#111520" },
   ],
 };
 
@@ -47,8 +48,8 @@ export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en" className={`${sans.variable} ${mono.variable}`}>
-      <body className="min-h-screen antialiased bg-substrate text-ink selection:bg-brass-soft selection:text-ink">
+    <html lang="en" className={`${sans.variable} ${mono.variable}`} suppressHydrationWarning>
+      <body className="min-h-screen antialiased bg-substrate text-ink selection:bg-brass-wash selection:text-ink">
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
           {children}
           <PwaRegister />

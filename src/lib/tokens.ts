@@ -35,7 +35,7 @@ export async function getValidToken(sim: SimRow): Promise<TokenState> {
   const refreshPromise = (async () => {
     try {
       // Re-read latest DB state in case a previous concurrent refresh just finished
-      const currentSim = dbApi.getSim(sim.phone) ?? sim;
+      const currentSim = (await dbApi.getSim(sim.phone)) ?? sim;
       const currentNow = Math.floor(Date.now() / 1000);
       if (
         currentSim.access_token &&
@@ -50,7 +50,7 @@ export async function getValidToken(sim: SimRow): Promise<TokenState> {
         const refreshed = await refreshAccessToken(currentSim.refresh_token);
         if (refreshed) {
           const freshNow = Math.floor(Date.now() / 1000);
-          dbApi.upsertSim(currentSim.phone, {
+          await dbApi.upsertSim(currentSim.phone, {
             access_token: refreshed.access_token,
             refresh_token: refreshed.refresh_token ?? currentSim.refresh_token,
             token_expires_at: freshNow + (refreshed.expires_in ?? 300),
@@ -62,7 +62,7 @@ export async function getValidToken(sim: SimRow): Promise<TokenState> {
       }
 
       // Refresh failed → needs manual re-login
-      dbApi.upsertSim(currentSim.phone, { status: "logged_out" });
+      await dbApi.upsertSim(currentSim.phone, { status: "logged_out" });
       return { token: null, refreshed: false, needsLogin: true };
     } finally {
       inFlightRefreshes.delete(sim.phone);

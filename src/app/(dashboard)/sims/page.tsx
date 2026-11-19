@@ -2,14 +2,15 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { toast } from "sonner";
-import { BatteryLow, Cpu, Plus, Search, SquareStack, X } from "lucide-react";
+import { BatteryLow, CalendarClock, Cpu, FolderInput, Plus, Search, SquareStack, X } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { OtpInput } from "@/components/ui/OtpInput";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { ErrorBanner, ErrorState } from "@/components/ui/ErrorState";
 import { Pagination } from "@/components/ui/Pagination";
-import { SegmentedControl } from "@/components/ui/SegmentedControl";
+import { SegmentedControl, type SegmentedOption } from "@/components/ui/SegmentedControl";
+import { Select } from "@/components/ui/Select";
 import {
   Dialog,
   DialogContent,
@@ -20,184 +21,188 @@ import {
 } from "@/components/ui/Dialog";
 import { SimCard, SimCardSkeleton } from "@/components/SimCard";
 import { fmtAmount, fmtKs, fmtPhoneGrouped, sameNumber } from "@/lib/format";
-import { fetchSims, invalidateCache, ApiError } from "@/lib/api";
+import { fetchSimsPage, invalidateCache, ApiError } from "@/lib/api";
 import { LOW_BALANCE_THRESHOLD } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 import { useLive } from "@/lib/liveEvents";
 import { useSessionState } from "@/lib/useSessionState";
+import { useSession } from "@/components/SessionProvider";
 import { CooldownSeconds, useCooldownActive } from "@/components/Cooldown";
 import type { Sim } from "@/lib/types";
 
 type LoginMode = "otp" | "password";
-/** Which endpoint pair the SMS code belongs to — see /api/auth/request-otp. */
 type Flow = "login" | "register";
+type View = "all" | "active" | "inactive" | "drained" | "expiring" | "expired";
+type SortKey = "recent" | "balance-asc" | "balance-desc" | "expiry-asc";
 
-/** Which slice of the tray is on screen. */
-type View = "all" | "active" | "inactive" | "drained";
-type SortKey = "recent" | "balance-asc" | "balance-desc";
-
-/**
- * Cards per page. A multiple of 2, 3 and 4 so the last row of the responsive
- * grid is never left ragged at any breakpoint.
- */
 const PAGE_SIZE = 24;
+const SEARCH_DEBOUNCE_MS = 250;
 
-/**
- * Pre-built stagger styles. The entrance animation needs a per-position delay,
- * but a fresh `{ animationDelay }` literal per render would defeat SimCard's
- * memoisation — these are shared, so a card's props only change when its data
- * or selection does. Positions past the eighth reuse the last delay.
- */
 const STAGGER: CSSProperties[] = Array.from({ length: 9 }, (_, i) => ({
   animationDelay: `${i * 40}ms`,
 }));
 
-/** A SIM that can't fund a transfer worth sending. Unread balances don't count. */
-function isDrained(sim: Sim): boolean {
-  return sim.balance !== null && sim.balance < LOW_BALANCE_THRESHOLD;
-}
-
 export default function SimsPage() {
+  const { loading: sessionLoading, permissions, rexFilter, rexGroups, refreshSession } = useSession();
+
   const [sims, setSims] = useState<Sim[]>([]);
+  const [total, setTotal] = useState(0);
+  const [counts, setCounts] = useState({
+    all: 0,
+    active: 0,
+    inactive: 0,
+    drained: 0,
+    expiring: 0,
+    expired: 0,
+  });
   const [loaded, setLoaded] = useState(false);
+  const [fetching, setFetching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState<string | null>(null);
-  const [searchQuery, setSearchQuery] = useState("");
+
+  const [searchInput, setSearchInput] = useState("");
+  const [query, setQuery] = useState("");
   const [view, setView] = useState<View>("all");
   const [sortBy, setSortBy] = useState<SortKey>("recent");
   const [page, setPage] = useState(1);
+
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedSims, setSelectedSims] = useState<string[]>([]);
-  /** Membership test for the cards on screen, without rescanning the array. */
   const selectedSet = useMemo(() => new Set(selectedSims), [selectedSims]);
-  /** Paging jumps back here rather than leaving the operator mid-grid. */
   const trayTopRef = useRef<HTMLDivElement>(null);
+  const requestSeq = useRef(0);
 
+  // Login modal state
   const [loginOpen, setLoginOpen] = useSessionState("login_open", false);
   const [mode, setMode] = useSessionState<LoginMode>("login_mode", "otp");
   const [phone, setPhone] = useSessionState("login_phone", "");
   const [otp, setOtp] = useSessionState("login_otp", "");
   const [password, setPassword] = useSessionState("login_password", "");
+  const [targetRexId, setTargetRexId] = useState<string>("");
   const [otpSent, setOtpSent] = useSessionState("login_otpSent", false);
   const [otpError, setOtpError] = useState(false);
   const [busy, setBusy] = useState(false);
   const [flow, setFlow] = useSessionState<Flow>("login_flow", "login");
-  // Only set on the register flow; v2/register/confirm needs it alongside the code.
   const [reqId, setReqId] = useSessionState<string | null>("login_reqId", null);
   const [regSubId, setRegSubId] = useSessionState<string | null>("login_regSubId", null);
-  
   const [loginResendAt, setLoginResendAt] = useSessionState("login_resendAt", 0);
-  // Only the boolean lives here; the ticking digit is a leaf inside the dialog, so
-  // the tray isn't re-rendered once a second for the length of every cooldown.
   const cooldownActive = useCooldownActive(loginResendAt);
 
   const [pendingRemove, setPendingRemove] = useState<Sim | null>(null);
   const [pendingBulkRemove, setPendingBulkRemove] = useState(false);
-  // The destructive buttons spin until the server confirms — the dialogs stay
-  // open through the request so a slow link never looks like nothing happened.
+  const [moveRexOpen, setMoveRexOpen] = useState(false);
+  const [moveTargetRexId, setMoveTargetRexId] = useState<string>("");
+  const [moving, setMoving] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  // Focused when the login dialog opens, so a number can be typed immediately.
   const phoneInputRef = useRef<HTMLInputElement>(null);
 
-  /**
-   * `background` keeps the rendered cards in place and swaps the data underneath.
-   * Only the first load may fall back to skeletons — a balance read or a removal
-   * replacing the whole tray with six placeholders reads as the tray emptying.
-   */
+  useEffect(() => {
+    const t = setTimeout(() => setQuery(searchInput.trim()), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [searchInput]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [view, query, sortBy, rexFilter]);
+
   const load = useCallback(
     (background = false) => {
+      if (sessionLoading || !permissions.sims.view) return;
+      const seq = ++requestSeq.current;
       if (!background) setLoaded(false);
-      const opts = background ? { bypassCache: true, noDelay: true } : undefined;
-      fetchSims(opts)
-        .then((all) => {
-          setSims(all);
+      setFetching(true);
+      const opts = background ? { bypassCache: true, noDelay: true } : { noDelay: true };
+
+      fetchSimsPage(
+        {
+          rexId: rexFilter,
+          view,
+          q: query || undefined,
+          sort: sortBy,
+          page,
+          pageSize: PAGE_SIZE,
+        },
+        opts
+      )
+        .then((res) => {
+          if (seq !== requestSeq.current) return;
+          setSims(res.sims);
+          setTotal(res.total);
+          setCounts(res.counts);
           setError(null);
         })
         .catch((err) => {
+          if (seq !== requestSeq.current) return;
           setError(err instanceof ApiError ? err.userMessage : "Something went wrong reading this.");
         })
-        .finally(() => setLoaded(true));
+        .finally(() => {
+          if (seq !== requestSeq.current) return;
+          setFetching(false);
+          setLoaded(true);
+        });
     },
-    []
+    [sessionLoading, permissions.sims.view, rexFilter, view, query, sortBy, page]
   );
 
   useEffect(() => {
     load();
   }, [load]);
 
-  // Shared app-wide EventSource: refetch on pushes, reconnect with backoff.
+  const loadRef = useRef(load);
+  useEffect(() => {
+    loadRef.current = load;
+  });
   useLive(() => {
     invalidateCache("sims");
-    load(true);
+    loadRef.current(true);
   });
 
-  /** One pass for every headline figure the toolbar shows. */
-  const counts = useMemo(() => {
-    let active = 0;
-    let drained = 0;
-    for (const s of sims) {
-      if (s.status === "active") active += 1;
-      if (isDrained(s)) drained += 1;
-    }
-    return { active, inactive: sims.length - active, drained };
-  }, [sims]);
-
-  /** View filter, then search, then sort — the full matching set, unpaged. */
-  const visibleSims = useMemo(() => {
-    let rows = sims;
-
-    if (view === "active") rows = rows.filter((s) => s.status === "active");
-    else if (view === "inactive") rows = rows.filter((s) => s.status !== "active");
-    else if (view === "drained") rows = rows.filter(isDrained);
-
-    const raw = searchQuery.trim();
-    if (raw) {
-      const q = raw.toLowerCase().replace(/[\s-+]/g, "");
-      const noteQ = raw.toLowerCase();
-      rows = rows.filter((s) => {
-        const phoneClean = s.phone.toLowerCase().replace(/[\s-+]/g, "");
-        return phoneClean.includes(q) || (s.note ? s.note.toLowerCase().includes(noteQ) : false);
-      });
-    }
-
-    if (sortBy !== "recent") {
-      const dir = sortBy === "balance-asc" ? 1 : -1;
-      // A SIM whose balance was never read isn't "0 Ks" — it sorts last either
-      // way, so an unread card can't masquerade as the emptiest in the tray.
-      rows = [...rows].sort((a, b) => {
-        if (a.balance === null) return b.balance === null ? 0 : 1;
-        if (b.balance === null) return -1;
-        return (a.balance - b.balance) * dir;
-      });
-    }
-
-    return rows;
-  }, [sims, view, searchQuery, sortBy]);
-
-  const pageCount = Math.max(1, Math.ceil(visibleSims.length / PAGE_SIZE));
-  // Derived rather than corrected in an effect: removing the last card on a page
-  // must not leave the grid blank for a render while a setState catches up.
+  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const currentPage = Math.min(Math.max(1, page), pageCount);
-  const pageRows = useMemo(
-    () => visibleSims.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE),
-    [visibleSims, currentPage]
-  );
 
-  // Narrowing the set always lands on its first page.
   useEffect(() => {
-    setPage(1);
-  }, [view, searchQuery, sortBy]);
+    if (loaded && page > pageCount) setPage(pageCount);
+  }, [loaded, page, pageCount]);
+
+  // If a conditional expiry tab disappears (count drops to 0 after refresh or Rex switch),
+  // seamlessly fall back to "all" instead of leaving an invisible active filter.
+  useEffect(() => {
+    if (!loaded) return;
+    if (view === "expiring" && counts.expiring === 0) setView("all");
+    else if (view === "expired" && counts.expired === 0) setView("all");
+  }, [loaded, view, counts.expiring, counts.expired]);
+
+  const filterOptions = useMemo<SegmentedOption<View>[]>(() => {
+    const opts: SegmentedOption<View>[] = [
+      { value: "all", label: `All ${fmtAmount(counts.all)}` },
+      { value: "active", label: `Active ${fmtAmount(counts.active)}` },
+      { value: "inactive", label: `Needs login ${fmtAmount(counts.inactive)}` },
+      { value: "drained", label: `Drained ${fmtAmount(counts.drained)}` },
+    ];
+    if (counts.expiring > 0) {
+      opts.push({
+        value: "expiring",
+        label: `<10d ${fmtAmount(counts.expiring)}`,
+        tone: "warn",
+      });
+    }
+    if (counts.expired > 0) {
+      opts.push({
+        value: "expired",
+        label: `Expired ${fmtAmount(counts.expired)}`,
+        tone: "alert",
+      });
+    }
+    return opts;
+  }, [counts]);
 
   const goToPage = useCallback((next: number) => {
     setPage(next);
     trayTopRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, []);
 
-  const allVisibleSelected =
-    visibleSims.length > 0 && visibleSims.every((s) => selectedSet.has(s.phone));
+  const allPageSelected = sims.length > 0 && sims.every((s) => selectedSet.has(s.phone));
 
-  // Stable identity: SimCard is memoised, so a fresh closure per render would
-  // re-render every card on screen whenever the page's own state moved.
   const openLogin = useCallback(
     (prefill?: string) => {
       setPhone(prefill ?? "");
@@ -209,9 +214,10 @@ export default function SimsPage() {
       setFlow("login");
       setReqId(null);
       setRegSubId(null);
+      setTargetRexId(rexFilter !== "all" ? rexFilter : "");
       setLoginOpen(true);
     },
-    [setPhone, setOtp, setPassword, setOtpSent, setMode, setFlow, setReqId, setRegSubId, setLoginOpen]
+    [setPhone, setOtp, setPassword, setOtpSent, setMode, setFlow, setReqId, setRegSubId, setLoginOpen, rexFilter]
   );
 
   async function requestOtp() {
@@ -221,7 +227,10 @@ export default function SimsPage() {
       const res = await fetch("/api/auth/request-otp", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone }),
+        body: JSON.stringify({
+          phone,
+          ...(permissions.rex.viewAll && targetRexId ? { rexId: Number(targetRexId) } : {}),
+        }),
       });
       const r = await res.json().catch(() => ({ ok: false, message: `Server error (${res.status})` }));
       if (res.ok && r.ok) {
@@ -238,16 +247,15 @@ export default function SimsPage() {
         });
       } else {
         const raw = r.message || r.error || "Check the number and try again.";
-        const isMsisdnError =
-          raw.includes("msisdnReq") || raw.includes("Invalid phone number");
+        const isMsisdnError = raw.includes("msisdnReq") || raw.includes("Invalid phone number");
         toast.error(isMsisdnError ? "Invalid phone number" : "Couldn't send the OTP", {
-          description: isMsisdnError
-            ? raw
-            : raw,
+          description: raw,
         });
       }
     } catch (err: any) {
-      toast.error("Network error", { description: err?.message || "The console couldn't reach Mytel. Try again." });
+      toast.error("Network error", {
+        description: err?.message || "The console couldn't reach Mytel. Try again.",
+      });
     } finally {
       setBusy(false);
     }
@@ -257,10 +265,11 @@ export default function SimsPage() {
     setBusy(true);
     try {
       const url = mode === "otp" ? "/api/auth/verify-otp" : "/api/auth/login-password";
+      const rexPayload = permissions.rex.viewAll && targetRexId ? { rexId: Number(targetRexId) } : {};
       const body =
         mode === "otp"
-          ? { phone, otp, reqId, subscriptionId: regSubId }
-          : { phone, password };
+          ? { phone, otp, reqId, subscriptionId: regSubId, ...rexPayload }
+          : { phone, password, ...rexPayload };
       const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -282,11 +291,10 @@ export default function SimsPage() {
         setLoginOpen(false);
         invalidateCache();
         load(true);
+        void refreshSession();
       } else {
         const msg = r.message || r.error || "Check the code or password and try again.";
-        const isNewCode =
-          r.errorCode === 401 || String(msg).toLowerCase().includes("new code");
-        
+        const isNewCode = r.errorCode === 401 || String(msg).toLowerCase().includes("new code");
         if (mode === "otp") {
           setOtpError(true);
           setTimeout(() => {
@@ -294,19 +302,19 @@ export default function SimsPage() {
             setOtpError(false);
           }, 500);
         }
-
-        if (flow !== "register" && isNewCode) {
-          toast.error("Login failed - Mytel sent a new code, please wait for second SMS", {
-            description: msg,
-          });
-        } else {
-          toast.error(flow === "register" ? "Couldn't open the account" : "Login failed", {
-            description: msg,
-          });
-        }
+        toast.error(
+          flow !== "register" && isNewCode
+            ? "Login failed - Mytel sent a new code, please wait for second SMS"
+            : flow === "register"
+              ? "Couldn't open the account"
+              : "Login failed",
+          { description: msg }
+        );
       }
     } catch (err: any) {
-      toast.error("Network error", { description: err?.message || "The console couldn't reach Mytel. Try again." });
+      toast.error("Network error", {
+        description: err?.message || "The console couldn't reach Mytel. Try again.",
+      });
     } finally {
       setBusy(false);
     }
@@ -320,15 +328,20 @@ export default function SimsPage() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ phone: sim.phone }),
-        }).then((r) => r.json());
+        }).then((res) => res.json());
         if (r.ok) {
           toast.success(`${fmtPhoneGrouped(sim.phone)} balance read`, {
-            description: r.balance !== null && r.balance !== undefined ? fmtKs(r.balance) : undefined,
+            description:
+              r.balance !== null && r.balance !== undefined
+                ? `${fmtKs(r.balance)}${r.billExpireAt ? ` · Exp ${r.billExpireAt}` : ""}`
+                : undefined,
           });
         } else if (r.needsLogin) {
           toast.error("Token expired", {
             description: `Log in ${fmtPhoneGrouped(sim.phone)} again to keep using it.`,
-            action: { label: "Log in", onClick: () => openLogin(sim.phone) },
+            action: permissions.sims.addLogin
+              ? { label: "Log in", onClick: () => openLogin(sim.phone) }
+              : undefined,
           });
         } else {
           toast.error("Couldn't read the balance", { description: r.message || r.error || undefined });
@@ -341,7 +354,7 @@ export default function SimsPage() {
         setRefreshing(null);
       }
     },
-    [load, openLogin]
+    [load, openLogin, permissions.sims.addLogin]
   );
 
   const toggleSelection = useCallback((sim: Sim) => {
@@ -351,24 +364,19 @@ export default function SimsPage() {
   }, []);
 
   const requestRemove = useCallback((sim: Sim) => setPendingRemove(sim), []);
-
   const loginAgain = useCallback((sim: Sim) => openLogin(sim.phone), [openLogin]);
 
-  /**
-   * Select or clear the whole matching set, not just the page on screen — the
-   * point of the Drained view is removing all of them in one pass.
-   */
-  const toggleSelectAllVisible = useCallback(() => {
+  const toggleSelectAllOnPage = useCallback(() => {
     setSelectedSims((prev) => {
-      const visible = visibleSims.map((s) => s.phone);
-      const allIn = visible.length > 0 && visible.every((p) => prev.includes(p));
+      const pagePhones = sims.map((s) => s.phone);
+      const allIn = pagePhones.length > 0 && pagePhones.every((p) => prev.includes(p));
       if (allIn) {
-        const drop = new Set(visible);
+        const drop = new Set(pagePhones);
         return prev.filter((p) => !drop.has(p));
       }
-      return [...new Set([...prev, ...visible])];
+      return [...new Set([...prev, ...pagePhones])];
     });
-  }, [visibleSims]);
+  }, [sims]);
 
   async function confirmRemove() {
     const sim = pendingRemove;
@@ -387,8 +395,9 @@ export default function SimsPage() {
       setPendingRemove(null);
       invalidateCache();
       load(true);
+      void refreshSession();
     } catch {
-      toast.error("Couldn't remove the SIM", { description: "Network error — try again." });
+      toast.error("Couldn't remove the SIM", { description: "Permission denied or network error." });
     } finally {
       setDeleting(false);
     }
@@ -405,8 +414,6 @@ export default function SimsPage() {
         body: JSON.stringify({ phones }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      // The server reports rows it actually deleted — a phone already gone from
-      // another tab shouldn't be counted as removed here.
       const body = await res.json().catch(() => ({}));
       const removed = typeof body.removed === "number" ? body.removed : phones.length;
       toast.success(`${fmtAmount(removed)} ${removed === 1 ? "SIM" : "SIMs"} removed`, {
@@ -417,90 +424,104 @@ export default function SimsPage() {
       setPendingBulkRemove(false);
       invalidateCache();
       load(true);
+      void refreshSession();
     } catch {
-      toast.error("Couldn't remove the SIMs", { description: "Network error — try again." });
+      toast.error("Couldn't remove the SIMs", { description: "Permission denied or network error." });
     } finally {
       setDeleting(false);
     }
   }
 
-  /**
-   * What a bulk removal would actually discard. Selection survives paging and
-   * filter changes, so the dialog can't just say "these ones" — it has to
-   * account for balance the operator may not have on screen.
-   */
-  const selectedSummary = useMemo(() => {
-    let count = 0;
-    let balance = 0;
-    let unread = 0;
-    let funded = 0;
-    for (const s of sims) {
-      if (!selectedSet.has(s.phone)) continue;
-      count += 1;
-      if (s.balance === null) unread += 1;
-      else {
-        balance += s.balance;
-        if (s.balance >= LOW_BALANCE_THRESHOLD) funded += 1;
-      }
+  async function confirmMoveRex() {
+    if (selectedSims.length === 0 || moving) return;
+    setMoving(true);
+    try {
+      const res = await fetch("/api/sims", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          phones: selectedSims,
+          rexId: moveTargetRexId ? Number(moveTargetRexId) : null,
+        }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || !body.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      toast.success(`Moved ${fmtAmount(body.moved ?? selectedSims.length)} SIM(s)`);
+      setSelectedSims([]);
+      setSelectionMode(false);
+      setMoveRexOpen(false);
+      invalidateCache();
+      load(true);
+      void refreshSession();
+    } catch (err: any) {
+      toast.error("Couldn't move SIMs", { description: err?.message || "Try again." });
+    } finally {
+      setMoving(false);
     }
-    return { count, balance, unread, funded };
-  }, [sims, selectedSet]);
+  }
 
+  const canSelectAny = permissions.sims.delete || (permissions.sims.moveRex && permissions.rex.viewAll);
   const canSubmit = mode === "otp" ? otp.length === 6 : password.length > 0;
-  /** A number already in the tray is a token refresh, not a second card. */
   const alreadyInTray = phone ? sims.find((s) => sameNumber(s.phone, phone)) : undefined;
 
-  /**
-   * Why the grid came back empty. A search that found nothing, an empty Drained
-   * view and an empty Logged-out view are three different situations, and the
-   * generic "no matching SIMs" made the good news (nothing is drained) read like
-   * a failure.
-   */
-  const emptyView = searchQuery.trim()
+  const emptyView = query
     ? {
         title: "No matching SIMs",
-        body: `Nothing in ${view === "all" ? "the tray" : "this view"} matches "${searchQuery}". Try a different number or note.`,
+        body: `Nothing in ${view === "all" ? "the tray" : "this view"} matches "${query}".`,
       }
     : view === "drained"
       ? {
           title: "Nothing is drained",
           body: `Every SIM with a balance reading is holding at least ${fmtAmount(LOW_BALANCE_THRESHOLD)} Ks.`,
         }
-      : view === "inactive"
+      : view === "expiring"
         ? {
-            title: "Every SIM is logged in",
-            body: "No token has expired, so nothing needs a fresh SMS code right now.",
+            title: "No SIMs expiring within 10 days",
+            body: "All SIMs with a bill expiry reading have more than 10 days remaining.",
           }
-        : {
-            title: "No active SIMs",
-            body: "Every SIM in the tray needs logging in again before it can send.",
-          };
+        : view === "expired"
+          ? {
+              title: "No expired SIMs",
+              body: "No SIM in this scope has passed its bill expiry date.",
+            }
+          : view === "inactive"
+            ? {
+                title: "Every SIM is logged in",
+                body: "No token has expired, so nothing needs a fresh SMS code right now.",
+              }
+            : {
+                title: "No active SIMs",
+                body: "Every SIM in the tray needs logging in again before it can send.",
+              };
+
+  if (!sessionLoading && !permissions.sims.view) {
+    return (
+      <div className="max-w-5xl mx-auto pt-6">
+        <EmptyState title="Access restricted" body="Your role does not include SIM Tray access." />
+      </div>
+    );
+  }
 
   return (
     <div
       className={cn(
         "max-w-6xl mx-auto space-y-5",
-        // The floating action bar is fixed to the viewport bottom; without this
-        // it sits on top of the last row of cards instead of below them.
         selectionMode && selectedSims.length > 0 && "pb-24"
       )}
     >
       <div ref={trayTopRef} className="space-y-3 scroll-mt-24">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <span className="font-mono text-eyebrow font-semibold uppercase tnum text-ink-mute">
-            {visibleSims.length === sims.length ? (
+            {total === counts.all ? (
               <>
-                {fmtAmount(sims.length)} {sims.length === 1 ? "SIM" : "SIMs"} ·{" "}
+                {fmtAmount(counts.all)} {counts.all === 1 ? "SIM" : "SIMs"} ·{" "}
                 {fmtAmount(counts.active)} active
               </>
             ) : (
               <>
-                {fmtAmount(visibleSims.length)} of {fmtAmount(sims.length)}{" "}
-                {sims.length === 1 ? "SIM" : "SIMs"}
+                {fmtAmount(total)} of {fmtAmount(counts.all)} {counts.all === 1 ? "SIM" : "SIMs"}
               </>
             )}
-            {/* The one figure worth surfacing unprompted: SIMs that can no longer
-                fund a transfer. Doubles as the way into the view that clears them. */}
             {counts.drained > 0 && view !== "drained" && (
               <>
                 {" · "}
@@ -514,21 +535,50 @@ export default function SimsPage() {
                 </button>
               </>
             )}
+            {counts.expiring > 0 && view !== "expiring" && (
+              <>
+                {" · "}
+                <button
+                  type="button"
+                  onClick={() => setView("expiring")}
+                  className="inline-flex items-center gap-1 text-brass-deep underline decoration-dotted underline-offset-2 transition-colors hover:text-brass"
+                >
+                  <CalendarClock className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+                  {fmtAmount(counts.expiring)} expiring &lt;10d
+                </button>
+              </>
+            )}
+            {counts.expired > 0 && view !== "expired" && (
+              <>
+                {" · "}
+                <button
+                  type="button"
+                  onClick={() => setView("expired")}
+                  className="inline-flex items-center gap-1 text-alert-deep underline decoration-dotted underline-offset-2 transition-colors hover:text-alert"
+                >
+                  <CalendarClock className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+                  {fmtAmount(counts.expired)} expired
+                </button>
+              </>
+            )}
           </span>
-          <div className="flex items-center gap-2.5">
-            <div className="relative w-44 sm:w-60">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative w-44 sm:w-56">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-faint" />
               <input
                 type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
                 placeholder="Search SIM or note..."
                 className="h-8 w-full rounded border border-hairline bg-card pl-8 pr-7 text-xs text-ink placeholder:text-ink-faint transition-colors focus:border-brass focus:outline-none focus:ring-1 focus:ring-brass"
               />
-              {searchQuery && (
+              {searchInput && (
                 <button
                   type="button"
-                  onClick={() => setSearchQuery("")}
+                  onClick={() => {
+                    setSearchInput("");
+                    setQuery("");
+                  }}
                   className="absolute right-2 top-1/2 -translate-y-1/2 text-ink-faint hover:text-ink"
                   title="Clear search"
                 >
@@ -536,7 +586,7 @@ export default function SimsPage() {
                 </button>
               )}
             </div>
-            {sims.length > 0 && (
+            {counts.all > 0 && canSelectAny && (
               <Button
                 variant="outline"
                 size="sm"
@@ -553,90 +603,79 @@ export default function SimsPage() {
                 {selectionMode ? "Cancel" : "Select"}
               </Button>
             )}
-            <Button variant="secondary" size="sm" onClick={() => openLogin()} className="shrink-0 transition-transform hover:scale-105 active:scale-95">
-              <Plus className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
-              Log in a SIM
-            </Button>
+            {permissions.sims.addLogin && (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => openLogin()}
+                className="shrink-0 transition-transform hover:scale-105 active:scale-95"
+              >
+                <Plus className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+                Log in a SIM
+              </Button>
+            )}
           </div>
         </div>
 
-        {/* Second row appears only once there's a tray to slice up. Narrow screens
-            scroll the tabs sideways rather than squeezing four labels to nothing. */}
-        {sims.length > 0 && (
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="-mb-px max-w-full overflow-x-auto pb-px">
+        {counts.all > 0 && (
+          <div className="flex flex-wrap items-center justify-between gap-2.5">
+            <div className="min-w-0 max-w-full overflow-x-auto scrollbar-none">
               <SegmentedControl<View>
                 aria-label="Filter the tray"
                 value={view}
                 onValueChange={setView}
-                options={[
-                  { value: "all", label: `All ${fmtAmount(sims.length)}` },
-                  { value: "active", label: `Active ${fmtAmount(counts.active)}` },
-                  { value: "inactive", label: `Needs login ${fmtAmount(counts.inactive)}` },
-                  { value: "drained", label: `Drained ${fmtAmount(counts.drained)}` },
-                ]}
+                options={filterOptions}
               />
             </div>
 
-            <div className="flex items-center gap-2">
-              {selectionMode && visibleSims.length > 0 && (
-                <Button variant="ghost" size="sm" onClick={toggleSelectAllVisible}>
-                  {allVisibleSelected
-                    ? `Clear ${fmtAmount(visibleSims.length)}`
-                    : `Select all ${fmtAmount(visibleSims.length)}`}
+            <div className="flex shrink-0 items-center gap-2">
+              {selectionMode && sims.length > 0 && (
+                <Button variant="ghost" size="sm" onClick={toggleSelectAllOnPage}>
+                  {allPageSelected
+                    ? `Clear page`
+                    : `Select page (${fmtAmount(sims.length)})`}
                 </Button>
               )}
-              <label className="flex items-center gap-2">
+              <div className="flex items-center gap-2">
                 <span className="font-mono text-eyebrow font-semibold uppercase text-ink-mute">
                   Sort
                 </span>
-                <select
+                <Select<SortKey>
+                  aria-label="Sort SIMs"
                   value={sortBy}
-                  onChange={(e) => setSortBy(e.target.value as SortKey)}
-                  className="h-8 rounded border border-hairline bg-card px-2 text-xs text-ink transition-colors focus:border-brass focus:outline-none focus:ring-1 focus:ring-brass"
-                >
-                  <option value="recent">Last updated</option>
-                  <option value="balance-asc">Balance: low to high</option>
-                  <option value="balance-desc">Balance: high to low</option>
-                </select>
-              </label>
+                  onValueChange={setSortBy}
+                  align="right"
+                  options={[
+                    { value: "recent", label: "Last updated" },
+                    { value: "expiry-asc", label: "Expiry: soonest first" },
+                    { value: "balance-asc", label: "Balance: low to high" },
+                    { value: "balance-desc", label: "Balance: high to low" },
+                  ]}
+                  triggerClassName="min-w-[164px]"
+                />
+              </div>
             </div>
           </div>
         )}
       </div>
 
-      {/* A refresh that failed with cards already on screen keeps them and says so. */}
       {error && sims.length > 0 && (
-        <ErrorBanner
-          what="the SIM tray"
-          detail={error}
-          onRetry={() => load(true)}
-          retrying={!loaded}
-        />
+        <ErrorBanner what="the SIM tray" detail={error} onRetry={() => load(true)} retrying={fetching} />
       )}
 
-      {!loaded ? (
+      {!loaded || sessionLoading ? (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {[1, 2, 3, 4, 5, 6].map((i) => (
             <SimCardSkeleton key={i} />
           ))}
         </div>
-      ) : error && sims.length === 0 ? (
-        // Distinguish "no SIMs" from "couldn't read the SIMs" — the empty-tray
-        // illustration below made a failed read look like the tray was wiped.
-        <ErrorState
-          what="the SIM tray"
-          detail={error}
-          onRetry={() => load(true)}
-          retrying={!loaded}
-        />
-      ) : loaded && sims.length === 0 ? (
+      ) : error && counts.all === 0 ? (
+        <ErrorState what="the SIM tray" detail={error} onRetry={() => load(true)} retrying={fetching} />
+      ) : counts.all === 0 ? (
         <EmptyState
           icon={
             <div className="relative w-24 h-24 flex items-center justify-center group-hover:scale-105 transition-transform duration-500">
-              <div className="absolute inset-0 bg-gradient-to-tr from-brass-soft/20 to-transparent rounded-2xl animate-pulse" />
-              <div className="absolute -inset-2 bg-substrate rounded-3xl opacity-50 dark:opacity-10 blur-xl" />
-              <div className="relative w-16 h-20 bg-card border border-hairline shadow-xl rounded-md flex flex-col p-2 notch-lg rotate-12 transition-transform duration-500 hover:rotate-6">
+              <div className="relative w-16 h-20 bg-card border border-hairline shadow-xl rounded-md flex flex-col p-2 notch-lg rotate-12">
                 <div className="absolute right-1 top-4 w-4 h-4 text-brass-deep/20">
                   <Cpu className="w-full h-full" strokeWidth={1.5} />
                 </div>
@@ -651,33 +690,45 @@ export default function SimsPage() {
             </div>
           }
           title="The tray is empty"
-          body="Log in a Mytel SIM with an SMS code or its MyID password to read balances and send transfers."
+          body={
+            permissions.sims.addLogin
+              ? "Log in a Mytel SIM with an SMS code or its MyID password to read balances and send transfers."
+              : "No SIMs are assigned to this group yet."
+          }
           action={
-            <Button onClick={() => openLogin()} className="transition-transform hover:scale-105 active:scale-95 shadow-md">
-              <Plus className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
-              Log in a SIM
-            </Button>
+            permissions.sims.addLogin ? (
+              <Button onClick={() => openLogin()} className="transition-transform hover:scale-105 active:scale-95 shadow-md">
+                <Plus className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+                Log in a SIM
+              </Button>
+            ) : undefined
           }
         />
-      ) : loaded && visibleSims.length === 0 ? (
+      ) : sims.length === 0 ? (
         <EmptyState
           icon={
-            <div className="relative w-24 h-24 flex items-center justify-center">
-              <div className="absolute inset-0 bg-substrate rounded-full opacity-50 blur-lg" />
-              <div className="relative w-16 h-16 bg-card border border-hairline rounded-full flex items-center justify-center shadow-inner">
-                {view === "drained" && !searchQuery.trim() ? (
-                  <BatteryLow className="h-7 w-7 text-ink-mute" strokeWidth={1.5} />
-                ) : (
-                  <Search className="h-7 w-7 text-ink-mute animate-pulse" strokeWidth={1.5} />
-                )}
-              </div>
+            <div className="relative w-16 h-16 bg-card border border-hairline rounded-full flex items-center justify-center shadow-inner">
+              {view === "drained" && !query ? (
+                <BatteryLow className="h-7 w-7 text-ink-mute" strokeWidth={1.5} />
+              ) : (view === "expiring" || view === "expired") && !query ? (
+                <CalendarClock className="h-7 w-7 text-ink-mute" strokeWidth={1.5} />
+              ) : (
+                <Search className="h-7 w-7 text-ink-mute" strokeWidth={1.5} />
+              )}
             </div>
           }
           title={emptyView.title}
           body={emptyView.body}
           action={
-            searchQuery.trim() ? (
-              <Button variant="outline" size="sm" onClick={() => setSearchQuery("")}>
+            query ? (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setSearchInput("");
+                  setQuery("");
+                }}
+              >
                 Clear search
               </Button>
             ) : view !== "all" ? (
@@ -689,8 +740,13 @@ export default function SimsPage() {
         />
       ) : (
         <>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {pageRows.map((s, i) => (
+          <div
+            className={cn(
+              "grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 transition-opacity",
+              fetching && "opacity-60"
+            )}
+          >
+            {sims.map((s, i) => (
               <SimCard
                 key={s.id}
                 sim={s}
@@ -698,6 +754,10 @@ export default function SimsPage() {
                 onRefresh={refreshBalance}
                 onRemove={requestRemove}
                 onLogin={loginAgain}
+                canRefresh={permissions.sims.refresh}
+                canDelete={permissions.sims.delete}
+                canLogin={permissions.sims.addLogin}
+                showRex={permissions.rex.viewAll && rexFilter === "all"}
                 selectionMode={selectionMode}
                 selected={selectedSet.has(s.phone)}
                 onSelectToggle={toggleSelection}
@@ -711,17 +771,15 @@ export default function SimsPage() {
             currentPage={currentPage}
             pageCount={pageCount}
             pageSize={PAGE_SIZE}
-            totalItems={visibleSims.length}
+            totalItems={total}
             onPageChange={goToPage}
             noun={["SIM", "SIMs"]}
           />
         </>
       )}
 
-      {/* Login */}
+      {/* Login SIM Dialog */}
       <Dialog open={loginOpen} onOpenChange={setLoginOpen}>
-        {/* Land straight in the phone field: the whole point of the dialog is
-            typing a number, so don't let Radix park focus on the close X. */}
         <DialogContent
           onOpenAutoFocus={(e) => {
             e.preventDefault();
@@ -732,13 +790,11 @@ export default function SimsPage() {
             <DialogTitle>Log in a SIM</DialogTitle>
             <DialogDescription>
               Mytel authorises this console with the SIM&apos;s own credentials. A number with no
-              MyID account yet gets one opened by the same SMS code. Nothing leaves this machine.
+              MyID account yet gets one opened by the same SMS code.
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-5 mt-2">
-            {/* While an SMS code is pending, switching to the password tab would
-                abandon that code — lock the switch until Cancel/Resend resolves it. */}
+          <div className="space-y-4 mt-2">
             <SegmentedControl
               aria-label="Login method"
               value={mode}
@@ -761,6 +817,25 @@ export default function SimsPage() {
               className="w-full"
             />
 
+            {permissions.rex.viewAll && rexGroups.length > 0 && (
+              <div>
+                <span className="mb-1.5 block font-mono text-eyebrow font-semibold uppercase text-ink-mute">
+                  Assign to Rex category
+                </span>
+                <Select
+                  aria-label="Assign SIM to Rex category"
+                  value={targetRexId}
+                  onValueChange={setTargetRexId}
+                  disabled={otpSent}
+                  className="w-full"
+                  options={[
+                    { value: "", label: "Unassigned (Admin only)" },
+                    ...rexGroups.map((g) => ({ value: String(g.id), label: g.name })),
+                  ]}
+                />
+              </div>
+            )}
+
             <div className="space-y-4">
               <Input
                 ref={phoneInputRef}
@@ -782,7 +857,7 @@ export default function SimsPage() {
               {alreadyInTray && (
                 <p className="text-xs leading-relaxed text-ink-mute">
                   {fmtPhoneGrouped(alreadyInTray.phone)} is already in the tray. Logging in again
-                  replaces its stored token and keeps its place — no duplicate card.
+                  replaces its stored token and keeps its place.
                 </p>
               )}
 
@@ -799,13 +874,21 @@ export default function SimsPage() {
                       </div>
 
                       <div className="mt-1">
-                        <OtpInput value={otp} onChange={(v) => { setOtp(v); setOtpError(false); }} autoFocus error={otpError} onSubmit={canSubmit && !busy ? doLogin : undefined} />
+                        <OtpInput
+                          value={otp}
+                          onChange={(v) => {
+                            setOtp(v);
+                            setOtpError(false);
+                          }}
+                          autoFocus
+                          error={otpError}
+                          onSubmit={canSubmit && !busy ? doLogin : undefined}
+                        />
                       </div>
 
                       {flow === "register" && (
                         <p className="mt-3 text-xs leading-relaxed text-ink-mute">
-                          This number has no MyID account. Entering the code opens one and logs it
-                          in — no need to visit the MyID app first.
+                          This number has no MyID account. Entering the code opens one and logs it in.
                         </p>
                       )}
                     </div>
@@ -857,14 +940,14 @@ export default function SimsPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Remove */}
+      {/* Remove Single SIM */}
       <Dialog open={!!pendingRemove} onOpenChange={(o) => !o && setPendingRemove(null)}>
         <DialogContent onCloseAutoFocus={(e) => e.preventDefault()}>
           <DialogHeader>
             <DialogTitle>Remove {pendingRemove && fmtPhoneGrouped(pendingRemove.phone)}?</DialogTitle>
             <DialogDescription>
               This drops the SIM and its stored tokens from the tray. Transfers it already made stay
-              in the history, and you can log it back in any time.
+              in the history.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -882,37 +965,12 @@ export default function SimsPage() {
       <Dialog open={pendingBulkRemove} onOpenChange={setPendingBulkRemove}>
         <DialogContent onCloseAutoFocus={(e) => e.preventDefault()}>
           <DialogHeader>
-            <DialogTitle>Remove {fmtAmount(selectedSummary.count)} SIMs?</DialogTitle>
+            <DialogTitle>Remove {fmtAmount(selectedSims.length)} SIMs?</DialogTitle>
             <DialogDescription>
-              This drops the selected SIMs and their stored tokens from the tray. Transfers they already made stay
-              in the history, and you can log them back in any time.
+              This drops the selected SIMs and their stored tokens from the tray. Their transfer
+              histories stay in the log.
             </DialogDescription>
           </DialogHeader>
-
-          {/* Selection outlives paging and filters, so spell out what's in it —
-              the balance being dropped is the part that can't be undone by a
-              re-login, and it may be sitting on a page that isn't on screen. */}
-          <div className="mt-1 space-y-2 rounded border border-hairline bg-substrate p-3 font-mono text-xs tnum text-ink-mute">
-            <div className="flex items-center justify-between gap-4">
-              <span className="uppercase text-ink-faint">Balance in these SIMs</span>
-              <span className={selectedSummary.balance > 0 ? "text-brass-deep" : undefined}>
-                {fmtKs(selectedSummary.balance)}
-              </span>
-            </div>
-            {selectedSummary.funded > 0 && (
-              <p className="leading-relaxed text-alert-deep">
-                {fmtAmount(selectedSummary.funded)} of them still hold{" "}
-                {fmtAmount(LOW_BALANCE_THRESHOLD)} Ks or more.
-              </p>
-            )}
-            {selectedSummary.unread > 0 && (
-              <p className="leading-relaxed">
-                {fmtAmount(selectedSummary.unread)} have never had a balance read, so their real
-                balance is unknown.
-              </p>
-            )}
-          </div>
-
           <DialogFooter>
             <Button variant="ghost" onClick={() => setPendingBulkRemove(false)} disabled={deleting}>
               Keep them
@@ -924,23 +982,70 @@ export default function SimsPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Floating Action Bar for Bulk Select — the wrapper owns the centering
-          translate; the entrance animation fills with its own transform and
-          would otherwise wipe the -translate-x-1/2 once it settles. */}
+      {/* Move Rex Dialog */}
+      <Dialog open={moveRexOpen} onOpenChange={setMoveRexOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Move {fmtAmount(selectedSims.length)} SIM(s) to Rex</DialogTitle>
+            <DialogDescription>
+              Reassign the selected SIMs to another Rex category. Past transfer logs remain under their
+              original Rex.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-2">
+            <Select
+              aria-label="Target Rex category"
+              value={moveTargetRexId}
+              onValueChange={setMoveTargetRexId}
+              className="w-full"
+              options={[
+                { value: "", label: "Unassigned (Admin only)" },
+                ...rexGroups.map((g) => ({ value: String(g.id), label: g.name })),
+              ]}
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setMoveRexOpen(false)} disabled={moving}>
+              Cancel
+            </Button>
+            <Button loading={moving} onClick={confirmMoveRex}>
+              Move SIMs
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Floating Bulk Action Bar */}
       {selectionMode && selectedSims.length > 0 && (
         <div className="fixed bottom-6 left-1/2 z-50 max-w-[calc(100vw-2rem)] -translate-x-1/2">
-          <div className="flex animate-rise-in items-center gap-2 rounded-full border border-hairline bg-card p-2 pr-2 shadow-2xl sm:gap-4 sm:pr-4">
+          <div className="flex animate-rise-in items-center gap-2 rounded-full border border-hairline bg-card p-2 pr-2 shadow-2xl sm:gap-3 sm:pr-4">
             <div className="flex h-10 items-center rounded-full bg-substrate px-3 font-mono text-sm font-semibold tnum sm:px-4">
               {fmtAmount(selectedSims.length)} selected
             </div>
-            <Button
-              variant="destructive"
-              size="sm"
-              onClick={() => setPendingBulkRemove(true)}
-              className="rounded-full"
-            >
-              Remove
-            </Button>
+            {permissions.sims.moveRex && permissions.rex.viewAll && (
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => {
+                  setMoveTargetRexId("");
+                  setMoveRexOpen(true);
+                }}
+                className="rounded-full"
+              >
+                <FolderInput className="h-3.5 w-3.5" />
+                Move Rex
+              </Button>
+            )}
+            {permissions.sims.delete && (
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => setPendingBulkRemove(true)}
+                className="rounded-full"
+              >
+                Remove
+              </Button>
+            )}
             <Button
               variant="ghost"
               size="sm"

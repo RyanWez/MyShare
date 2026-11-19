@@ -51,14 +51,14 @@ function TokenLife({ expiresAt, className }: TokenLifeProps) {
   const low = !expired && remaining < HOUR;
 
   const label = expired
-    ? "Refreshes on next use"
+    ? "Refreshes on use"
     : remaining < DAY
-      ? `Token ${fmtCountdown(remaining)}`
-      : `Token to ${fmtShortDate(expiresAt!)}`;
+      ? fmtCountdown(remaining)
+      : `To ${fmtShortDate(expiresAt!)}`;
 
   return (
     <div
-      className={cn("flex min-w-0 items-center gap-2.5", className)}
+      className={cn("flex min-w-0 items-center gap-2", className)}
       title={expiresAt ? `Access token expires ${fmtStamp(expiresAt)}` : undefined}
     >
       <div className="flex shrink-0 gap-[3px]" aria-hidden="true">
@@ -66,7 +66,7 @@ function TokenLife({ expiresAt, className }: TokenLifeProps) {
           <span
             key={i}
             className={cn(
-              "h-2.5 w-2 rounded-[1px] transition-colors duration-500",
+              "h-2.5 w-1.5 rounded-[1px] transition-colors duration-500",
               i < lit ? (low ? "bg-alert" : "bg-brass") : "bg-hairline"
             )}
           />
@@ -74,7 +74,7 @@ function TokenLife({ expiresAt, className }: TokenLifeProps) {
       </div>
       <span
         className={cn(
-          "truncate whitespace-nowrap font-mono text-eyebrow uppercase tnum",
+          "truncate whitespace-nowrap font-mono text-[10.5px] uppercase tnum",
           expired ? "text-ink-faint" : low ? "text-alert-deep" : "text-ink-mute"
         )}
       >
