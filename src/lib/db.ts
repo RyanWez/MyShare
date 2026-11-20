@@ -2,8 +2,9 @@ import { query, withTransaction } from "./pg";
 import { sse } from "./events";
 import { compareNatural, compareOperatorUsers, parseBillExpireDate, phoneSearchKeys } from "./format";
 import { decryptSecret, encryptSecret } from "./crypto";
-import { LOW_BALANCE_THRESHOLD } from "./constants";
+import { DAILY_VOLUME_LIMIT, LOW_BALANCE_THRESHOLD, MONTHLY_VOLUME_LIMIT, TRANSFER_READY_MIN_BALANCE } from "./constants";
 import { normalizePermissions, type RolePermissions } from "./permissions";
+import type { TransferBalanceFilter, TransferSimCounts } from "./types";
 
 export { DAILY_VOLUME_LIMIT, MONTHLY_VOLUME_LIMIT } from "./constants";
 
@@ -132,6 +133,12 @@ const PUBLIC_SIM_COLUMNS =
   "s.token_expires_at, s.refresh_expires_at, s.subscription_id, s.balance, " +
   "s.balance_checked_at, s.bill_expire_at, s.block_one_way, s.block_two_way, s.sim_status_text, " +
   "s.status, s.note, s.created_at, s.updated_at";
+
+const PAGED_SIM_PROJECTION =
+  "p.id, p.phone, p.rex_id, p.rex_name, p.added_by_user_id, " +
+  "p.token_expires_at, p.refresh_expires_at, p.subscription_id, p.balance, " +
+  "p.balance_checked_at, p.bill_expire_at, p.block_one_way, p.block_two_way, p.sim_status_text, " +
+  "p.status, p.note, p.created_at, p.updated_at";
 
 const TODAY_MM_SQL = `(NOW() AT TIME ZONE 'Asia/Yangon')::date`;
 const EXPIRING_SOON_DAYS = 10;
@@ -685,10 +692,16 @@ export const dbApi = {
   async listSimsPublic(opts?: {
     rexId?: number | null;
     status?: string;
+    balanceFilter?: TransferBalanceFilter;
     q?: string;
     includePhone?: string;
     limit?: number;
-  }): Promise<{ sims: PublicSimRow[]; total: number; activeTotal: number }> {
+  }): Promise<{
+    sims: (PublicSimRow & { volume_today: number; volume_this_month: number })[];
+    total: number;
+    activeTotal: number;
+    counts: TransferSimCounts;
+  }> {
     const scopeClauses: string[] = [];
     const scopeArgs: unknown[] = [];
     if (opts?.rexId !== undefined && opts.rexId !== null) {
@@ -696,6 +709,9 @@ export const dbApi = {
       scopeClauses.push(`s.rex_id = $${scopeArgs.length}`);
     }
     const scopeWhere = scopeClauses.length ? `WHERE ${scopeClauses.join(" AND ")}` : "";
+
+    const balanceFilter: TransferBalanceFilter =
+      opts?.balanceFilter === "ready" || opts?.balanceFilter === "low" ? opts.balanceFilter : "all";
 
     const clauses = [...scopeClauses];
     const args = [...scopeArgs];
@@ -706,6 +722,12 @@ export const dbApi = {
 
     if (opts?.status) {
       clauses.push(`s.status = ${push(opts.status)}`);
+    }
+
+    if (balanceFilter === "ready") {
+      clauses.push(`s.status = 'active' AND s.balance IS NOT NULL AND s.balance >= ${push(TRANSFER_READY_MIN_BALANCE)}`);
+    } else if (balanceFilter === "low") {
+      clauses.push(`s.status = 'active' AND s.balance IS NOT NULL AND s.balance < ${push(TRANSFER_READY_MIN_BALANCE)}`);
     }
 
     const searchRaw = opts?.q?.trim();
@@ -720,26 +742,77 @@ export const dbApi = {
     }
 
     const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
-    const limitVal = Math.max(1, Math.min(2000, opts?.limit ?? 48));
-    const limitParam = push(limitVal);
+    const filterArgs = [...args];
 
-    const [rowsRes, countRes, activeRes] = await Promise.all([
-      query<PublicSimRow>(
-        `SELECT ${PUBLIC_SIM_COLUMNS}
+    const monthStartSec = startOfThisMonth();
+    const todayStartSec = startOfToday();
+
+    const rowsArgs = [...filterArgs];
+    const pushRow = (v: unknown) => {
+      rowsArgs.push(v);
+      return `$${rowsArgs.length}`;
+    };
+    const monthStartParam = pushRow(monthStartSec);
+    const todayStartParam = pushRow(todayStartSec);
+    const mvRexClause =
+      opts?.rexId !== undefined && opts.rexId !== null ? `AND t.rex_id = ${pushRow(opts.rexId)}` : "";
+    const headroomAmt = balanceFilter === "ready" ? 5000 : 500;
+    const dailyHeadroomParam = pushRow(DAILY_VOLUME_LIMIT - headroomAmt);
+    const monthlyHeadroomParam = pushRow(MONTHLY_VOLUME_LIMIT - headroomAmt);
+    const dailyCapParam = pushRow(DAILY_VOLUME_LIMIT);
+    const monthlyCapParam = pushRow(MONTHLY_VOLUME_LIMIT);
+    const limitVal = Math.max(1, Math.min(2000, opts?.limit ?? 48));
+    const limitParam = pushRow(limitVal);
+
+    const readyMinParam = `$${scopeArgs.length + 1}`;
+    const [rowsRes, countRes, countsRes] = await Promise.all([
+      query<PublicSimRow & { volume_today: number; volume_this_month: number }>(
+        `WITH month_vol AS (
+           SELECT t.sender_phone,
+                  COALESCE(SUM(t.amount) FILTER (WHERE t.created_at >= ${todayStartParam}), 0)::bigint AS vol_today,
+                  COALESCE(SUM(t.amount), 0)::bigint AS vol_month
+           FROM transfers t
+           WHERE t.status = 'success' AND t.created_at >= ${monthStartParam} ${mvRexClause}
+           GROUP BY t.sender_phone
+         )
+         SELECT ${PUBLIC_SIM_COLUMNS},
+                COALESCE(mv.vol_today, 0)::bigint AS volume_today,
+                COALESCE(mv.vol_month, 0)::bigint AS volume_this_month
          FROM sims s
          LEFT JOIN rex_groups rg ON rg.id = s.rex_id
+         LEFT JOIN month_vol mv ON mv.sender_phone = s.phone
          ${where}
-         ORDER BY CASE WHEN s.status = 'active' THEN 0 ELSE 1 END ASC, s.updated_at DESC, s.id DESC
+         ORDER BY
+           CASE WHEN s.status = 'active' THEN 0 ELSE 1 END ASC,
+           CASE
+             WHEN s.status = 'active'
+              AND COALESCE(mv.vol_today, 0) <= ${dailyHeadroomParam}
+              AND COALESCE(mv.vol_month, 0) <= ${monthlyHeadroomParam}
+             THEN 0
+             WHEN s.status = 'active'
+              AND COALESCE(mv.vol_today, 0) < ${dailyCapParam}
+              AND COALESCE(mv.vol_month, 0) < ${monthlyCapParam}
+             THEN 1
+             ELSE 2
+           END ASC,
+           s.updated_at DESC,
+           s.id DESC
          LIMIT ${limitParam}`,
-        args
+        rowsArgs
       ),
       query<{ c: number }>(
         `SELECT COUNT(*)::int AS c FROM sims s ${where}`,
-        args.slice(0, args.length - 1)
+        filterArgs
       ),
-      query<{ c: number }>(
-        `SELECT COUNT(*)::int AS c FROM sims s ${scopeWhere ? `${scopeWhere} AND s.status = 'active'` : `WHERE s.status = 'active'`}`,
-        scopeArgs
+      query<{ all: number; active_total: number; ready: number; low: number }>(
+        `SELECT
+           COUNT(*)::int AS all,
+           COUNT(*) FILTER (WHERE s.status = 'active')::int AS active_total,
+           COUNT(*) FILTER (WHERE s.status = 'active' AND s.balance IS NOT NULL AND s.balance >= ${readyMinParam})::int AS ready,
+           COUNT(*) FILTER (WHERE s.status = 'active' AND s.balance IS NOT NULL AND s.balance < ${readyMinParam})::int AS low
+         FROM sims s
+         ${scopeWhere}`,
+        [...scopeArgs, TRANSFER_READY_MIN_BALANCE]
       ),
     ]);
 
@@ -747,14 +820,36 @@ export const dbApi = {
     const includePhone = opts?.includePhone?.trim();
     if (includePhone && !sims.some((s) => s.phone === includePhone)) {
       const incArgs: unknown[] = [includePhone];
-      const incRexClause =
-        opts?.rexId !== undefined && opts.rexId !== null ? `AND s.rex_id = $2` : "";
-      if (opts?.rexId !== undefined && opts.rexId !== null) incArgs.push(opts.rexId);
-      const incRes = await query<PublicSimRow>(
-        `SELECT ${PUBLIC_SIM_COLUMNS}
+      const incClauses: string[] = [`s.phone = $1`];
+      const pushInc = (v: unknown) => {
+        incArgs.push(v);
+        return `$${incArgs.length}`;
+      };
+      if (opts?.rexId !== undefined && opts.rexId !== null) {
+        incClauses.push(`s.rex_id = ${pushInc(opts.rexId)}`);
+      }
+      if (balanceFilter === "ready") {
+        incClauses.push(`s.status = 'active' AND s.balance IS NOT NULL AND s.balance >= ${pushInc(TRANSFER_READY_MIN_BALANCE)}`);
+      } else if (balanceFilter === "low") {
+        incClauses.push(`s.status = 'active' AND s.balance IS NOT NULL AND s.balance < ${pushInc(TRANSFER_READY_MIN_BALANCE)}`);
+      }
+      const incMonthParam = pushInc(monthStartSec);
+      const incTodayParam = pushInc(todayStartSec);
+      const incMvRexClause =
+        opts?.rexId !== undefined && opts.rexId !== null ? `AND t.rex_id = ${pushInc(opts.rexId)}` : "";
+      const incRes = await query<PublicSimRow & { volume_today: number; volume_this_month: number }>(
+        `SELECT ${PUBLIC_SIM_COLUMNS},
+                COALESCE(v.vol_today, 0)::bigint AS volume_today,
+                COALESCE(v.vol_month, 0)::bigint AS volume_this_month
          FROM sims s
          LEFT JOIN rex_groups rg ON rg.id = s.rex_id
-         WHERE s.phone = $1 ${incRexClause}
+         LEFT JOIN LATERAL (
+           SELECT COALESCE(SUM(t.amount) FILTER (WHERE t.created_at >= ${incTodayParam}), 0)::bigint AS vol_today,
+                  COALESCE(SUM(t.amount), 0)::bigint AS vol_month
+           FROM transfers t
+           WHERE t.status = 'success' AND t.created_at >= ${incMonthParam} AND t.sender_phone = s.phone ${incMvRexClause}
+         ) v ON TRUE
+         WHERE ${incClauses.join(" AND ")}
          LIMIT 1`,
         incArgs
       );
@@ -763,10 +858,20 @@ export const dbApi = {
       }
     }
 
+    const cRow = countsRes.rows[0];
     return {
-      sims,
+      sims: sims.map((s) => ({
+        ...s,
+        volume_today: Number(s.volume_today ?? 0),
+        volume_this_month: Number(s.volume_this_month ?? 0),
+      })),
       total: countRes.rows[0]?.c ?? sims.length,
-      activeTotal: activeRes.rows[0]?.c ?? 0,
+      activeTotal: cRow?.active_total ?? 0,
+      counts: {
+        all: cRow?.all ?? 0,
+        ready: cRow?.ready ?? 0,
+        low: cRow?.low ?? 0,
+      },
     };
   },
 
@@ -792,33 +897,6 @@ export const dbApi = {
 
     const lowParamIdx = scopeArgs.length + 1;
     const daysParamIdx = scopeArgs.length + 2;
-    const countsRes = await query<{
-      all: number;
-      active: number;
-      inactive: number;
-      drained: number;
-      expiring: number;
-      expired: number;
-    }>(
-      `SELECT
-         COUNT(*)::int AS all,
-         COUNT(*) FILTER (WHERE s.status = 'active')::int AS active,
-         COUNT(*) FILTER (WHERE s.status <> 'active')::int AS inactive,
-         COUNT(*) FILTER (WHERE s.status = 'active' AND s.balance IS NOT NULL AND s.balance < $${lowParamIdx})::int AS drained,
-         COUNT(*) FILTER (WHERE s.bill_expire_date IS NOT NULL AND s.bill_expire_date > ${TODAY_MM_SQL} AND (s.bill_expire_date - ${TODAY_MM_SQL}) <= $${daysParamIdx})::int AS expiring,
-         COUNT(*) FILTER (WHERE s.bill_expire_date IS NOT NULL AND s.bill_expire_date <= ${TODAY_MM_SQL})::int AS expired
-       FROM sims s
-       ${scopeWhere}`,
-      [...scopeArgs, LOW_BALANCE_THRESHOLD, EXPIRING_SOON_DAYS]
-    );
-    const counts = countsRes.rows[0] ?? {
-      all: 0,
-      active: 0,
-      inactive: 0,
-      drained: 0,
-      expiring: 0,
-      expired: 0,
-    };
 
     const clauses: string[] = [...scopeClauses];
     const args = [...scopeArgs];
@@ -853,15 +931,7 @@ export const dbApi = {
     }
 
     const whereSql = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
-
-    const totalRes = await query<{ c: number }>(
-      `SELECT COUNT(*)::int AS c
-       FROM sims s
-       ${searchRaw ? "LEFT JOIN rex_groups rg ON rg.id = s.rex_id" : ""}
-       ${whereSql}`,
-      args
-    );
-    const total = totalRes.rows[0]?.c ?? 0;
+    const totalArgs = [...args];
 
     let orderSql = "s.updated_at DESC, s.id DESC";
     if (q.sort === "balance-asc") {
@@ -872,35 +942,83 @@ export const dbApi = {
       orderSql = "CASE WHEN s.bill_expire_date IS NULL THEN 1 ELSE 0 END ASC, s.bill_expire_date ASC, s.updated_at DESC";
     }
 
-    const limitParam = push(q.pageSize);
-    const offsetParam = push((Math.max(1, q.page) - 1) * q.pageSize);
+    const rowsArgs = [...totalArgs];
+    const pushRow = (v: unknown) => {
+      rowsArgs.push(v);
+      return `$${rowsArgs.length}`;
+    };
+    const limitParam = pushRow(q.pageSize);
+    const offsetParam = pushRow((Math.max(1, q.page) - 1) * q.pageSize);
+    const monthStartParam = pushRow(startOfThisMonth());
+    const todayStartParam = pushRow(startOfToday());
 
-    const rowsRes = await query<PublicSimRow>(
-      `SELECT ${PUBLIC_SIM_COLUMNS}
-       FROM sims s
-       LEFT JOIN rex_groups rg ON rg.id = s.rex_id
-       ${whereSql}
-       ORDER BY ${orderSql}
-       LIMIT ${limitParam} OFFSET ${offsetParam}`,
-      args
-    );
-
-    const simsPage = rowsRes.rows;
-    if (simsPage.length === 0) {
-      return { sims: [], total, counts };
-    }
-
-    const phones = simsPage.map((s) => s.phone);
-    const [todayVol, monthVol] = await Promise.all([
-      this.todayVolumeBySender(phones),
-      this.thisMonthVolumeBySender(phones),
+    const [countsRes, totalRes, rowsRes] = await Promise.all([
+      query<{
+        all: number;
+        active: number;
+        inactive: number;
+        drained: number;
+        expiring: number;
+        expired: number;
+      }>(
+        `SELECT
+           COUNT(*)::int AS all,
+           COUNT(*) FILTER (WHERE s.status = 'active')::int AS active,
+           COUNT(*) FILTER (WHERE s.status <> 'active')::int AS inactive,
+           COUNT(*) FILTER (WHERE s.status = 'active' AND s.balance IS NOT NULL AND s.balance < $${lowParamIdx})::int AS drained,
+           COUNT(*) FILTER (WHERE s.bill_expire_date IS NOT NULL AND s.bill_expire_date > ${TODAY_MM_SQL} AND (s.bill_expire_date - ${TODAY_MM_SQL}) <= $${daysParamIdx})::int AS expiring,
+           COUNT(*) FILTER (WHERE s.bill_expire_date IS NOT NULL AND s.bill_expire_date <= ${TODAY_MM_SQL})::int AS expired
+         FROM sims s
+         ${scopeWhere}`,
+        [...scopeArgs, LOW_BALANCE_THRESHOLD, EXPIRING_SOON_DAYS]
+      ),
+      query<{ c: number }>(
+        `SELECT COUNT(*)::int AS c
+         FROM sims s
+         ${searchRaw ? "LEFT JOIN rex_groups rg ON rg.id = s.rex_id" : ""}
+         ${whereSql}`,
+        totalArgs
+      ),
+      query<PublicSimRow & { volume_today: number; volume_this_month: number }>(
+        `WITH paged AS (
+           SELECT ${PUBLIC_SIM_COLUMNS},
+                  ROW_NUMBER() OVER (ORDER BY ${orderSql}) AS _ord
+           FROM sims s
+           LEFT JOIN rex_groups rg ON rg.id = s.rex_id
+           ${whereSql}
+           ORDER BY ${orderSql}
+           LIMIT ${limitParam} OFFSET ${offsetParam}
+         )
+         SELECT ${PAGED_SIM_PROJECTION},
+                COALESCE(v.vol_today, 0)::bigint AS volume_today,
+                COALESCE(v.vol_month, 0)::bigint AS volume_this_month
+         FROM paged p
+         LEFT JOIN LATERAL (
+           SELECT COALESCE(SUM(t.amount) FILTER (WHERE t.created_at >= ${todayStartParam}), 0)::bigint AS vol_today,
+                  COALESCE(SUM(t.amount), 0)::bigint AS vol_month
+           FROM transfers t
+           WHERE t.status = 'success' AND t.created_at >= ${monthStartParam} AND t.sender_phone = p.phone
+         ) v ON TRUE
+         ORDER BY p._ord ASC`,
+        rowsArgs
+      ),
     ]);
 
+    const counts = countsRes.rows[0] ?? {
+      all: 0,
+      active: 0,
+      inactive: 0,
+      drained: 0,
+      expiring: 0,
+      expired: 0,
+    };
+    const total = totalRes.rows[0]?.c ?? 0;
+
     return {
-      sims: simsPage.map((s) => ({
+      sims: rowsRes.rows.map((s) => ({
         ...s,
-        volume_today: todayVol[s.phone] ?? 0,
-        volume_this_month: monthVol[s.phone] ?? 0,
+        volume_today: Number(s.volume_today ?? 0),
+        volume_this_month: Number(s.volume_this_month ?? 0),
       })),
       total,
       counts,
@@ -1129,20 +1247,22 @@ export const dbApi = {
     offset: number
   ): Promise<{ rows: TransferRow[]; total: number }> {
     const { sql, args } = transfersWhereClause(f);
-    const rowsRes = await query<TransferRow>(
-      `SELECT ${TRANSFER_COLUMNS}
-       FROM transfers t
-       LEFT JOIN rex_groups rg ON rg.id = t.rex_id
-       LEFT JOIN users u ON u.id = t.created_by_user_id
-       ${sql}
-       ORDER BY t.created_at DESC, t.id DESC
-       LIMIT $${args.length + 1} OFFSET $${args.length + 2}`,
-      [...args, limit, offset]
-    );
-    const countRes = await query<{ c: number }>(
-      `SELECT COUNT(*)::int AS c FROM transfers t ${sql}`,
-      args
-    );
+    const [rowsRes, countRes] = await Promise.all([
+      query<TransferRow>(
+        `SELECT ${TRANSFER_COLUMNS}
+         FROM transfers t
+         LEFT JOIN rex_groups rg ON rg.id = t.rex_id
+         LEFT JOIN users u ON u.id = t.created_by_user_id
+         ${sql}
+         ORDER BY t.created_at DESC, t.id DESC
+         LIMIT $${args.length + 1} OFFSET $${args.length + 2}`,
+        [...args, limit, offset]
+      ),
+      query<{ c: number }>(
+        `SELECT COUNT(*)::int AS c FROM transfers t ${sql}`,
+        args
+      ),
+    ]);
     return { rows: rowsRes.rows, total: countRes.rows[0]?.c ?? 0 };
   },
 

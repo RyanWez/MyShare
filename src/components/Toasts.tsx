@@ -2,7 +2,7 @@
 
 import { useEffect } from "react";
 import { Toaster, toast } from "sonner";
-import { CheckCircle2, CircleAlert } from "lucide-react";
+import { CheckCircle2, CircleAlert, Info } from "lucide-react";
 
 const DEFAULT_MS = 4000;
 const SWEEP_MS = 500;
@@ -77,6 +77,11 @@ export default function Toasts() {
             <CircleAlert className="h-4 w-4 text-alert-deep" strokeWidth={2.5} />
           </div>
         ),
+        info: (
+          <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-brass-wash">
+            <Info className="h-4 w-4 text-brass-deep" strokeWidth={2.5} />
+          </div>
+        ),
       }}
       toastOptions={{
         unstyled: true,
@@ -88,6 +93,7 @@ export default function Toasts() {
             "data-[state=open]:slide-in-from-top-2 data-[state=closed]:slide-out-to-top-2 data-[swipe-direction=up]:slide-out-to-top-2 duration-300",
           success: "border-hairline",
           error: "border-hairline",
+          info: "border-hairline",
           icon: "shrink-0",
           content: "min-w-0 flex-1",
           title: "text-sm font-medium text-ink",

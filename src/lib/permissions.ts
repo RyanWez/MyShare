@@ -25,6 +25,7 @@ export interface RolePermissions {
     view: boolean;
     addLogin: boolean;
     refresh: boolean;
+    refreshUnlimited: boolean;
     delete: boolean;
     moveRex: boolean;
   };
@@ -67,6 +68,7 @@ export const DEFAULT_ADMIN_PERMISSIONS: RolePermissions = {
     view: true,
     addLogin: true,
     refresh: true,
+    refreshUnlimited: true,
     delete: true,
     moveRex: true,
   },
@@ -109,6 +111,7 @@ export const DEFAULT_STAFF_PERMISSIONS: RolePermissions = {
     view: true,
     addLogin: true,
     refresh: true,
+    refreshUnlimited: false,
     delete: false,
     moveRex: false,
   },
@@ -156,6 +159,7 @@ export function normalizePermissions(
   const overviewView = bool(ov.view, fallback.overview.view);
   const transferView = bool(tr.view, fallback.transfer.view);
   const simsView = bool(sm.view, fallback.sims.view);
+  const simsRefresh = simsView && bool(sm.refresh, fallback.sims.refresh);
   const historyView = bool(hs.view, fallback.history.view);
 
   return {
@@ -177,7 +181,8 @@ export function normalizePermissions(
     sims: {
       view: simsView,
       addLogin: simsView && bool(sm.addLogin, fallback.sims.addLogin),
-      refresh: simsView && bool(sm.refresh, fallback.sims.refresh),
+      refresh: simsRefresh,
+      refreshUnlimited: simsRefresh && bool(sm.refreshUnlimited, fallback.sims.refreshUnlimited),
       delete: simsView && bool(sm.delete, fallback.sims.delete),
       moveRex: simsView && bool(sm.moveRex, fallback.sims.moveRex),
     },
@@ -199,6 +204,15 @@ export function normalizePermissions(
       manage: bool(rl.manage, fallback.roles.manage),
     },
   };
+}
+
+/** Whether an operator is exempt from SIM refresh cooldown & burst rate limits. */
+export function hasUnlimitedRefresh(
+  roleName: string | undefined,
+  permissions: RolePermissions,
+  isEnvAdmin?: boolean
+): boolean {
+  return Boolean(isEnvAdmin) || roleName?.toLowerCase() === "admin" || permissions.sims.refreshUnlimited;
 }
 
 /** First accessible route for a user (used when Overview is disabled for a role). */

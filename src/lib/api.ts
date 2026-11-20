@@ -4,6 +4,8 @@ import type {
   SimsPageResponse,
   StatsResponse,
   Transfer,
+  TransferBalanceFilter,
+  TransferSimCounts,
 } from "./types";
 
 interface CacheEntry<T> {
@@ -120,6 +122,7 @@ export interface SimsListResponse {
   sims: Sim[];
   total: number;
   activeTotal: number;
+  counts: TransferSimCounts;
 }
 
 export async function fetchSims(opts?: {
@@ -127,6 +130,7 @@ export async function fetchSims(opts?: {
   noDelay?: boolean;
   rexId?: string;
   status?: string;
+  balanceFilter?: TransferBalanceFilter;
   q?: string;
   includePhone?: string;
   limit?: number;
@@ -134,22 +138,35 @@ export async function fetchSims(opts?: {
   const params = new URLSearchParams();
   if (opts?.rexId && opts.rexId !== "all") params.set("rexId", opts.rexId);
   if (opts?.status) params.set("status", opts.status);
+  if (opts?.balanceFilter && opts.balanceFilter !== "all") params.set("balanceFilter", opts.balanceFilter);
   if (opts?.q) params.set("q", opts.q);
   if (opts?.includePhone) params.set("includePhone", opts.includePhone);
   if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
   const qs = params.toString();
-  const key = `sims:${opts?.rexId || "all"}:${opts?.status || "all"}:${opts?.q || ""}:${opts?.includePhone || ""}:${opts?.limit ?? 48}`;
-  const data = await cachedFetch<{ ok: boolean; sims: Sim[]; total?: number; activeTotal?: number }>(
+  const key = `sims:${opts?.rexId || "all"}:${opts?.status || "all"}:${opts?.balanceFilter || "all"}:${opts?.q || ""}:${opts?.includePhone || ""}:${opts?.limit ?? 48}`;
+  const data = await cachedFetch<{
+    ok: boolean;
+    sims: Sim[];
+    total?: number;
+    activeTotal?: number;
+    counts?: TransferSimCounts;
+  }>(
     key,
     qs ? `/api/sims?${qs}` : "/api/sims",
     3000,
     opts
   );
   const sims = data.sims ?? [];
+  const activeCount = data.activeTotal ?? sims.filter((s) => s.status === "active").length;
   return {
     sims,
     total: data.total ?? sims.length,
-    activeTotal: data.activeTotal ?? sims.filter((s) => s.status === "active").length,
+    activeTotal: activeCount,
+    counts: data.counts ?? {
+      all: data.total ?? sims.length,
+      ready: sims.filter((s) => s.status === "active" && s.balance !== null && s.balance >= 5250).length,
+      low: sims.filter((s) => s.status === "active" && s.balance !== null && s.balance < 5250).length,
+    },
   };
 }
 

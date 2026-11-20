@@ -69,6 +69,14 @@ export interface Sim {
   updated_at: number;
 }
 
+export type TransferBalanceFilter = "ready" | "low" | "all";
+
+export interface TransferSimCounts {
+  all: number;
+  ready: number;
+  low: number;
+}
+
 export interface SimsPageResponse {
   sims: Sim[];
   total: number;

@@ -20,9 +20,10 @@ import {
   DialogTitle,
 } from "@/components/ui/Dialog";
 import { SimCard, SimCardSkeleton } from "@/components/SimCard";
-import { fmtAmount, fmtKs, fmtPhoneGrouped, sameNumber } from "@/lib/format";
+import { fmtAmount, fmtCountdown, fmtKs, fmtPhoneGrouped, sameNumber } from "@/lib/format";
 import { fetchSimsPage, invalidateCache, ApiError } from "@/lib/api";
 import { LOW_BALANCE_THRESHOLD } from "@/lib/constants";
+import { hasUnlimitedRefresh } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
 import { useLive } from "@/lib/liveEvents";
 import { useSessionState } from "@/lib/useSessionState";
@@ -43,7 +44,8 @@ const STAGGER: CSSProperties[] = Array.from({ length: 9 }, (_, i) => ({
 }));
 
 export default function SimsPage() {
-  const { loading: sessionLoading, permissions, rexFilter, rexGroups, refreshSession } = useSession();
+  const { loading: sessionLoading, user, permissions, rexFilter, rexGroups, refreshSession } = useSession();
+  const canBypassRefreshLimit = hasUnlimitedRefresh(user?.roleName, permissions, user?.isEnvAdmin);
 
   const [sims, setSims] = useState<Sim[]>([]);
   const [total, setTotal] = useState(0);
@@ -332,18 +334,52 @@ export default function SimsPage() {
       const phoneNum = typeof simOrPhone === "string" ? simOrPhone : simOrPhone.phone;
       setRefreshing(phoneNum);
       try {
-        const r = await fetch("/api/sims/refresh", {
+        const res = await fetch("/api/sims/refresh", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ phone: phoneNum }),
-        }).then((res) => res.json());
-        if (r.ok) {
+        });
+        const r = await res.json().catch(() => ({ ok: false, error: `Server error (${res.status})` }));
+        if (res.ok && r.ok) {
           toast.success(`${fmtPhoneGrouped(phoneNum)} balance read`, {
             description:
               r.balance !== null && r.balance !== undefined
                 ? `${fmtKs(r.balance)}${r.billExpireAt ? ` · Exp ${r.billExpireAt}` : ""}`
                 : undefined,
           });
+          invalidateCache();
+          load(true);
+        } else if (res.status === 429 || r.rateLimited) {
+          if (r.reason === "sim_cooldown") {
+            const checkedAgo = typeof r.checkedAgoSec === "number" ? fmtCountdown(r.checkedAgoSec) : null;
+            const waitFor = typeof r.retryAfterSec === "number" ? fmtCountdown(r.retryAfterSec) : null;
+            if (typeof r.lastCheckedAt === "number") {
+              setSims((prev) =>
+                prev.map((s) =>
+                  s.phone === phoneNum && s.balance_checked_at !== r.lastCheckedAt
+                    ? { ...s, balance_checked_at: r.lastCheckedAt }
+                    : s
+                )
+              );
+            }
+            toast.info("No need to refresh", {
+              description:
+                checkedAgo && waitFor
+                  ? `${fmtPhoneGrouped(phoneNum)} was checked ${checkedAgo} ago · try again in ${waitFor}.`
+                  : r.error || "Balance was checked recently.",
+            });
+          } else if (r.reason === "user_burst") {
+            const waitFor = typeof r.retryAfterSec === "number" ? fmtCountdown(r.retryAfterSec) : null;
+            toast.info("Slow down", {
+              description: waitFor
+                ? `Too many refreshes in a minute — try again in ${waitFor}.`
+                : r.error || "Too many refreshes — try again shortly.",
+            });
+          } else {
+            toast.info("Refresh in progress", {
+              description: r.error || `${fmtPhoneGrouped(phoneNum)} is already being refreshed.`,
+            });
+          }
         } else if (r.needsLogin) {
           toast.error("Token expired", {
             description: `Log in ${fmtPhoneGrouped(phoneNum)} again to keep using it.`,
@@ -351,11 +387,13 @@ export default function SimsPage() {
               ? { label: "Log in", onClick: () => openLogin(phoneNum) }
               : undefined,
           });
+          invalidateCache();
+          load(true);
         } else {
           toast.error("Couldn't read the balance", { description: r.message || r.error || undefined });
+          invalidateCache();
+          load(true);
         }
-        invalidateCache();
-        load(true);
       } catch {
         toast.error("Network error", { description: "The console couldn't reach Mytel. Try again." });
       } finally {
@@ -765,6 +803,7 @@ export default function SimsPage() {
                 onRemove={requestRemove}
                 onLogin={loginAgain}
                 canRefresh={permissions.sims.refresh}
+                canBypassRefreshLimit={canBypassRefreshLimit}
                 canDelete={permissions.sims.delete}
                 canLogin={permissions.sims.addLogin}
                 showRex={permissions.rex.viewAll && rexFilter === "all"}

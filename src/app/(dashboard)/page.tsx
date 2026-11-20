@@ -119,7 +119,9 @@ export default function DashboardPage() {
   const reload = useCallback((background = false) => {
     if (!ov.view) return Promise.resolve();
     if (!background) setLoading(true);
-    const opts = background ? { bypassCache: true, noDelay: true, rexId: rexRef.current } : { rexId: rexRef.current };
+    const opts = background
+      ? { bypassCache: true, noDelay: true, rexId: rexRef.current }
+      : { noDelay: true, rexId: rexRef.current };
     const r = rangeRef.current;
     return fetchStats(r.from, r.to, opts)
       .then((d: StatsResponse) => {
@@ -142,7 +144,7 @@ export default function DashboardPage() {
     let alive = true;
 
     setLoading(true);
-    fetchStats(range.from, range.to, { rexId: rexFilter })
+    fetchStats(range.from, range.to, { rexId: rexFilter, noDelay: true })
       .then((d: StatsResponse) => {
         if (!alive) return;
         if (d?.ok) {

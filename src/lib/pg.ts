@@ -141,6 +141,7 @@ async function initSchemaAndSeed(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_transfers_created_status ON transfers(created_at, status);
       CREATE INDEX IF NOT EXISTS idx_transfers_created_id ON transfers(created_at DESC, id DESC);
       CREATE INDEX IF NOT EXISTS idx_transfers_sender ON transfers(sender_phone);
+      CREATE INDEX IF NOT EXISTS idx_transfers_sender_status_created ON transfers(sender_phone, status, created_at);
       CREATE INDEX IF NOT EXISTS idx_transfers_rex_created ON transfers(rex_id, created_at DESC, id DESC);
       CREATE INDEX IF NOT EXISTS idx_transfers_status_created_sender ON transfers(status, created_at, sender_phone);
       CREATE INDEX IF NOT EXISTS idx_transfers_rex_status_created ON transfers(rex_id, status, created_at DESC, id DESC);
@@ -148,6 +149,7 @@ async function initSchemaAndSeed(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_sims_status ON sims(status);
       CREATE INDEX IF NOT EXISTS idx_sims_updated ON sims(updated_at DESC);
       CREATE INDEX IF NOT EXISTS idx_sims_rex_status ON sims(rex_id, status);
+      CREATE INDEX IF NOT EXISTS idx_sims_rex_status_balance ON sims(rex_id, status, balance);
       CREATE INDEX IF NOT EXISTS idx_sims_rex_exp_date ON sims(rex_id, bill_expire_date);
       CREATE INDEX IF NOT EXISTS idx_users_role ON users(role_id);
       CREATE INDEX IF NOT EXISTS idx_users_rex ON users(rex_id);

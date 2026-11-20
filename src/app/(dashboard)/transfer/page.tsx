@@ -13,15 +13,17 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { SimChip, SimChipSkeleton } from "@/components/SimCard";
 import { Stepper } from "@/components/Stepper";
 import { Receipt, ReceiptRow, ReceiptDivider } from "@/components/Receipt";
-import { fmtKs, fmtPhoneGrouped, fmtStamp } from "@/lib/format";
+import { SegmentedControl, type SegmentedOption } from "@/components/ui/SegmentedControl";
+import { fmtAmount, fmtKs, fmtPhoneGrouped, fmtStamp } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { fetchSims, invalidateCache } from "@/lib/api";
+import { useLive } from "@/lib/liveEvents";
 import { CooldownSeconds, useCooldownActive } from "@/components/Cooldown";
 import { useSessionState } from "@/lib/useSessionState";
 import { useLocalState } from "@/lib/useLocalState";
-import { DAILY_VOLUME_LIMIT, MONTHLY_VOLUME_LIMIT } from "@/lib/constants";
+import { DAILY_VOLUME_LIMIT, MONTHLY_VOLUME_LIMIT, TRANSFER_READY_MIN_BALANCE } from "@/lib/constants";
 import { useSession } from "@/components/SessionProvider";
-import type { Sim } from "@/lib/types";
+import type { Sim, TransferBalanceFilter, TransferSimCounts } from "@/lib/types";
 
 const QUICK = [500, 800, 1000, 5000];
 const RESEND_COOLDOWN = 60;
@@ -79,6 +81,9 @@ export default function TransferPage() {
   const [sims, setSims] = useState<Sim[]>([]);
   const [totalSims, setTotalSims] = useState(0);
   const [activeTotal, setActiveTotal] = useState(0);
+  const [counts, setCounts] = useState<TransferSimCounts>({ all: 0, ready: 0, low: 0 });
+  const [balanceFilter, setBalanceFilter] = useSessionState<TransferBalanceFilter>("transfer_balanceFilter", "ready");
+  const [expandedSims, setExpandedSims] = useState(false);
   const [selectedCache, setSelectedCache] = useState<Sim | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [sender, setSender] = useSessionState("transfer_sender", "");
@@ -97,6 +102,10 @@ export default function TransferPage() {
   const requestSeq = useRef(0);
   const senderRef = useRef(sender);
   senderRef.current = sender;
+  const stageRef = useRef(stage);
+  stageRef.current = stage;
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
 
   useEffect(() => {
     const t = setTimeout(() => setCommittedQuery(searchQuery.trim()), SEARCH_DEBOUNCE_MS);
@@ -114,6 +123,7 @@ export default function TransferPage() {
       const curSender = senderRef.current;
       return fetchSims({
         rexId: rexFilter,
+        balanceFilter,
         q: committedQuery || undefined,
         includePhone: !committedQuery && curSender ? curSender : undefined,
         limit: TRANSFER_SIM_LIMIT,
@@ -126,15 +136,16 @@ export default function TransferPage() {
           setSims(all);
           setTotalSims(res.total);
           setActiveTotal(res.activeTotal);
+          setCounts(res.counts);
           const matchInList = curSender ? all.find((s) => s.phone === curSender) : undefined;
           if (matchInList) {
             setSelectedCache(matchInList);
           }
-          if (!committedQuery) {
+          if (!committedQuery && stageRef.current !== "otp") {
             setSender((cur) => {
               if (cur && all.some((s) => s.phone === cur && s.status === "active")) return cur;
               const fallback = all.find((s) => s.status === "active");
-              if (fallback) setSelectedCache(fallback);
+              setSelectedCache(fallback ?? null);
               return fallback?.phone ?? "";
             });
           }
@@ -144,16 +155,34 @@ export default function TransferPage() {
           if (seq === requestSeq.current) setLoaded(true);
         });
     },
-    [setSender, rexFilter, committedQuery, sessionLoading, permissions.transfer.view]
+    [setSender, rexFilter, balanceFilter, committedQuery, sessionLoading, permissions.transfer.view]
   );
 
   useEffect(() => {
     loadSims();
   }, [loadSims]);
 
+  const loadSimsRef = useRef(loadSims);
+  loadSimsRef.current = loadSims;
+  useLive(() => {
+    if (stageRef.current === "form" && !busyRef.current) {
+      invalidateCache("sims");
+      void loadSimsRef.current(true);
+    }
+  });
+
+  const balanceFilterOptions = useMemo<SegmentedOption<TransferBalanceFilter>[]>(
+    () => [
+      { value: "ready", label: `${fmtAmount(TRANSFER_READY_MIN_BALANCE)}+ ${fmtAmount(counts.ready)}` },
+      { value: "low", label: `< ${fmtAmount(TRANSFER_READY_MIN_BALANCE)} ${fmtAmount(counts.low)}` },
+      { value: "all", label: `All ${fmtAmount(counts.all)}` },
+    ],
+    [counts]
+  );
+
   const selected = sims.find((s) => s.phone === sender) ?? (selectedCache?.phone === sender ? selectedCache : undefined);
   const senderBalance = selected?.balance ?? null;
-  // Server already orders active SIMs first; preserve that cleanly.
+  // Server already orders active SIMs (with quota headroom) first; preserve that cleanly.
   const orderedSims = useMemo(() => {
     const active = sims.filter((s) => s.status === "active");
     return [...active, ...sims.filter((s) => s.status !== "active")];
@@ -164,16 +193,16 @@ export default function TransferPage() {
       return orderedSims.slice(0, 12);
     }
 
-    // Default: Show up to 6 SIMs (ensuring selected sender stays visible)
-    const top6 = orderedSims.slice(0, 6);
-    if (sender && !top6.some((s) => s.phone === sender)) {
+    const maxCards = expandedSims ? 12 : 6;
+    const top = orderedSims.slice(0, maxCards);
+    if (sender && !top.some((s) => s.phone === sender)) {
       const currentSelected = orderedSims.find((s) => s.phone === sender);
       if (currentSelected) {
-        return [currentSelected, ...top6.slice(0, 5)];
+        return [currentSelected, ...top.slice(0, maxCards - 1)];
       }
     }
-    return top6;
-  }, [orderedSims, committedQuery, searchQuery, sender]);
+    return top;
+  }, [orderedSims, committedQuery, searchQuery, sender, expandedSims]);
   const amt = Number(amount);
   const fee = Number.isFinite(amt) ? Math.round(amt * 0.05) : 0;
   const total = amt + fee;
@@ -388,15 +417,40 @@ export default function TransferPage() {
       {/* Sender */}
       <section>
         <div className="flex flex-wrap items-center justify-between gap-2.5">
-          <div className="flex items-center gap-2">
-            <Eyebrow>From</Eyebrow>
-            {totalSims > 6 && !searchQuery.trim() && (
-              <span className="font-mono text-eyebrow uppercase text-ink-faint">
-                ({Math.min(6, displayedSims.length)} of {totalSims})
-              </span>
-            )}
+          <div className="flex flex-wrap items-center gap-2.5 min-w-0">
+            <div className="flex items-center gap-2">
+              <Eyebrow>From</Eyebrow>
+              {totalSims > (expandedSims ? 12 : 6) && !searchQuery.trim() && (
+                <span className="font-mono text-eyebrow uppercase text-ink-faint tnum">
+                  ({Math.min(expandedSims ? 12 : 6, displayedSims.length)} of {totalSims})
+                </span>
+              )}
+              {totalSims > 6 && !searchQuery.trim() && !locked && (
+                <button
+                  type="button"
+                  onClick={() => setExpandedSims((v) => !v)}
+                  className="font-mono text-[10px] uppercase tracking-wider text-brass-deep underline decoration-dotted underline-offset-2 hover:text-brass"
+                >
+                  {expandedSims ? "Show 6" : `Show ${Math.min(12, totalSims)}`}
+                </button>
+              )}
+            </div>
+
+            <div className="min-w-0 max-w-full overflow-x-auto scrollbar-none">
+              <SegmentedControl<TransferBalanceFilter>
+                aria-label="Filter sender SIMs by balance"
+                value={balanceFilter}
+                disabled={locked}
+                onValueChange={(next) => {
+                  setBalanceFilter(next);
+                  setExpandedSims(false);
+                }}
+                options={balanceFilterOptions}
+              />
+            </div>
           </div>
-          <div className="relative w-44 sm:w-60">
+
+          <div className="relative w-full sm:w-56">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-faint" />
             <input
               type="text"
@@ -427,17 +481,70 @@ export default function TransferPage() {
               ))}
             </div>
           ) : displayedSims.length === 0 ? (
-            <div className="w-full rounded border border-hairline bg-card p-6 text-center">
-              <p className="text-xs text-ink-mute">
-                No SIM found matching &quot;{searchQuery}&quot;
-              </p>
-              <button
-                type="button"
-                onClick={() => setSearchQuery("")}
-                className="mt-1 font-mono text-xs text-brass-deep underline hover:text-ink"
-              >
-                Clear search
-              </button>
+            <div className="w-full rounded border border-hairline bg-card p-6 text-center space-y-2">
+              {searchQuery.trim() ? (
+                <>
+                  <p className="text-xs text-ink-mute">
+                    No SIM found matching &quot;{searchQuery}&quot;
+                    {balanceFilter !== "all"
+                      ? ` in ${balanceFilter === "ready" ? `${fmtAmount(TRANSFER_READY_MIN_BALANCE)}+ Ks` : `< ${fmtAmount(TRANSFER_READY_MIN_BALANCE)} Ks`}`
+                      : ""}
+                  </p>
+                  <div className="flex flex-wrap items-center justify-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setSearchQuery("")}
+                      className="font-mono text-xs text-brass-deep underline hover:text-ink"
+                    >
+                      Clear search
+                    </button>
+                    {balanceFilter !== "all" && (
+                      <button
+                        type="button"
+                        onClick={() => setBalanceFilter("all")}
+                        className="font-mono text-xs text-ink-mute underline hover:text-ink"
+                      >
+                        Search All SIMs
+                      </button>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p className="text-xs text-ink-mute">
+                    {balanceFilter === "ready"
+                      ? `No active SIMs holding ${fmtAmount(TRANSFER_READY_MIN_BALANCE)}+ Ks right now.`
+                      : `No active SIMs under ${fmtAmount(TRANSFER_READY_MIN_BALANCE)} Ks.`}
+                  </p>
+                  <div className="flex flex-wrap items-center justify-center gap-3">
+                    {balanceFilter === "ready" && counts.low > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setBalanceFilter("low")}
+                        className="font-mono text-xs text-brass-deep underline hover:text-ink"
+                      >
+                        Show &lt; {fmtAmount(TRANSFER_READY_MIN_BALANCE)} ({fmtAmount(counts.low)})
+                      </button>
+                    )}
+                    {balanceFilter === "low" && counts.ready > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setBalanceFilter("ready")}
+                        className="font-mono text-xs text-brass-deep underline hover:text-ink"
+                      >
+                        Show {fmtAmount(TRANSFER_READY_MIN_BALANCE)}+ ({fmtAmount(counts.ready)})
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setBalanceFilter("all")}
+                      className="font-mono text-xs text-ink-mute underline hover:text-ink"
+                    >
+                      Show All ({fmtAmount(counts.all)})
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">

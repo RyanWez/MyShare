@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { dbApi } from "@/lib/db";
 import { normalizeMsisdn } from "@/lib/mytel";
 import { requireSession, resolveScopedRexId } from "@/lib/authz";
+import type { TransferBalanceFilter } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -51,34 +52,24 @@ export async function GET(req: NextRequest) {
 
   // Unpaged mode (used by Transfer sender picker, active-first with optional search & limit)
   const statusFilter = q.get("status") || undefined;
+  const bfParam = q.get("balanceFilter");
+  const balanceFilter: TransferBalanceFilter =
+    bfParam === "ready" || bfParam === "low" ? bfParam : "all";
   const searchQuery = q.get("q")?.trim() || undefined;
   const rawLimit = Number(q.get("limit"));
   const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(2000, Math.floor(rawLimit)) : 48;
   const includePhoneRaw = !searchQuery ? q.get("includePhone")?.trim() : undefined;
   const includePhone = includePhoneRaw ? normalizeMsisdn(includePhoneRaw) : undefined;
 
-  const { sims: simsRaw, total, activeTotal } = await dbApi.listSimsPublic({
+  const { sims, total, activeTotal, counts } = await dbApi.listSimsPublic({
     rexId,
     status: statusFilter,
+    balanceFilter,
     q: searchQuery,
     includePhone,
     limit,
   });
-  const phones = simsRaw.map((s) => s.phone);
-  const [volumeToday, volumeThisMonth] =
-    phones.length > 0
-      ? await Promise.all([
-          dbApi.todayVolumeBySender(phones, rexId),
-          dbApi.thisMonthVolumeBySender(phones, rexId),
-        ])
-      : [{}, {}];
-
-  const sims = simsRaw.map((s) => ({
-    ...s,
-    volume_today: volumeToday[s.phone] ?? 0,
-    volume_this_month: volumeThisMonth[s.phone] ?? 0,
-  }));
-  return NextResponse.json({ ok: true, sims, total, activeTotal });
+  return NextResponse.json({ ok: true, sims, total, activeTotal, counts });
 }
 
 export async function PATCH(req: NextRequest) {

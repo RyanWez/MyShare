@@ -7,8 +7,9 @@ import { Panel } from "@/components/ui/Panel";
 import { StatusDot } from "@/components/ui/StatusDot";
 import { Button } from "@/components/ui/Button";
 import { TokenLife } from "@/components/TokenLife";
+import { useCooldownActive } from "@/components/Cooldown";
 import { fmtAmount, fmtPhoneGrouped, fmtTime, statusBadge } from "@/lib/format";
-import { DAILY_VOLUME_LIMIT, MONTHLY_VOLUME_LIMIT } from "@/lib/constants";
+import { DAILY_VOLUME_LIMIT, MONTHLY_VOLUME_LIMIT, SIM_REFRESH_COOLDOWN_SEC } from "@/lib/constants";
 import type { Sim } from "@/lib/types";
 
 export interface SimCardProps {
@@ -18,6 +19,7 @@ export interface SimCardProps {
   onLogin?: (sim: Sim) => void;
   refreshing?: boolean;
   canRefresh?: boolean;
+  canBypassRefreshLimit?: boolean;
   canDelete?: boolean;
   canLogin?: boolean;
   showRex?: boolean;
@@ -82,6 +84,7 @@ const SimCard = React.memo(function SimCard({
   onLogin,
   refreshing,
   canRefresh = true,
+  canBypassRefreshLimit = false,
   canDelete = true,
   canLogin = true,
   showRex = false,
@@ -95,6 +98,14 @@ const SimCard = React.memo(function SimCard({
   const active = sim.status === "active";
   const atLimit = sim.volume_today >= DAILY_VOLUME_LIMIT || sim.volume_this_month >= MONTHLY_VOLUME_LIMIT;
   const expiry = classifyExpiry(sim.bill_expire_at);
+  const cooldownUntil =
+    !canBypassRefreshLimit &&
+    active &&
+    sim.balance !== null &&
+    sim.balance_checked_at !== null
+      ? sim.balance_checked_at + SIM_REFRESH_COOLDOWN_SEC
+      : 0;
+  const refreshCooldownActive = useCooldownActive(cooldownUntil);
 
   const blockTitleParts = [
     sim.sim_status_text ? `Status: ${sim.sim_status_text}` : null,
@@ -190,7 +201,14 @@ const SimCard = React.memo(function SimCard({
                       onClick={() => onRefresh(sim)}
                       disabled={refreshing}
                       aria-label={`Read balance for ${fmtPhoneGrouped(sim.phone)}`}
-                      title="Read balance & expiry"
+                      title={
+                        refreshCooldownActive
+                          ? "No need to refresh yet — recently checked"
+                          : "Read balance & expiry"
+                      }
+                      className={cn(
+                        refreshCooldownActive && !refreshing && "text-ink-faint hover:text-ink-mute"
+                      )}
                     >
                       <RefreshCw
                         className={cn("h-3.5 w-3.5", refreshing && "animate-spin")}

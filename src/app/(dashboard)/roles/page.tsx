@@ -455,6 +455,7 @@ export default function RolesPage() {
                       view: v,
                       addLogin: v ? p.sims.addLogin : false,
                       refresh: v ? p.sims.refresh : false,
+                      refreshUnlimited: v ? p.sims.refreshUnlimited : false,
                       delete: v ? p.sims.delete : false,
                       moveRex: v ? p.sims.moveRex : false,
                     },
@@ -471,7 +472,25 @@ export default function RolesPage() {
                 label="Refresh Balance & Expiry"
                 checked={draftPerms.sims.refresh}
                 disabled={isLockedAdmin || !draftPerms.sims.view}
-                onChange={(v) => setDraftPerms((p) => ({ ...p, sims: { ...p.sims, refresh: v } }))}
+                onChange={(v) =>
+                  setDraftPerms((p) => ({
+                    ...p,
+                    sims: {
+                      ...p.sims,
+                      refresh: v,
+                      refreshUnlimited: v ? p.sims.refreshUnlimited : false,
+                    },
+                  }))
+                }
+              />
+              <PermSwitch
+                label="Bypass Refresh Rate Limit"
+                hint="Skip the 5-minute SIM cooldown and per-minute burst cap."
+                checked={draftPerms.sims.refreshUnlimited}
+                disabled={isLockedAdmin || !draftPerms.sims.view || !draftPerms.sims.refresh}
+                onChange={(v) =>
+                  setDraftPerms((p) => ({ ...p, sims: { ...p.sims, refreshUnlimited: v } }))
+                }
               />
               <PermSwitch
                 label="Delete SIMs"
