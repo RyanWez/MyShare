@@ -128,6 +128,11 @@ const TRANSFER_COLUMNS =
   "t.created_by_user_id, u.username AS created_by_username, " +
   "t.amount, t.fee, t.status, t.error_code, t.message, t.created_at";
 
+const OUTER_TRANSFER_COLUMNS =
+  "r.id, r.sender_phone, r.receiver_phone, r.rex_id, r.rex_name, " +
+  "r.created_by_user_id, r.created_by_username, " +
+  "r.amount, r.fee, r.status, r.error_code, r.message, r.created_at";
+
 const PUBLIC_SIM_COLUMNS =
   "s.id, s.phone, s.rex_id, rg.name AS rex_name, s.added_by_user_id, " +
   "s.token_expires_at, s.refresh_expires_at, s.subscription_id, s.balance, " +
@@ -140,6 +145,12 @@ const PAGED_SIM_PROJECTION =
   "p.balance_checked_at, p.bill_expire_at, p.block_one_way, p.block_two_way, p.sim_status_text, " +
   "p.status, p.note, p.created_at, p.updated_at";
 
+const OUTER_SIM_COLUMNS =
+  "r.id, r.phone, r.rex_id, r.rex_name, r.added_by_user_id, " +
+  "r.token_expires_at, r.refresh_expires_at, r.subscription_id, r.balance, " +
+  "r.balance_checked_at, r.bill_expire_at, r.block_one_way, r.block_two_way, r.sim_status_text, " +
+  "r.status, r.note, r.created_at, r.updated_at, r.volume_today, r.volume_this_month";
+
 const TODAY_MM_SQL = `(NOW() AT TIME ZONE 'Asia/Yangon')::date`;
 const EXPIRING_SOON_DAYS = 10;
 
@@ -150,7 +161,7 @@ const MM_OFFSET_SEC = 6 * 3600 + 30 * 60; // Asia/Yangon UTC+06:30 (no DST)
 
 const SESSION_CACHE_TTL_MS = 10_000;
 const SESSION_CACHE_MAX = 256;
-const REX_CACHE_TTL_MS = 3_000;
+const REX_CACHE_TTL_MS = 15_000;
 
 const globalDbCache = globalThis as unknown as {
   __myshareSessionCache?: Map<number, { row: UserAuthRow | null; exp: number }>;
@@ -260,6 +271,54 @@ function transfersWhereClause(f: TransfersFilter): { sql: string; args: unknown[
   }
 
   return { sql: clauses.length ? `WHERE ${clauses.join(" AND ")}` : "", args };
+}
+
+function mapSimSummaryRow(r: any): PublicSimRow & { volume_today: number; volume_this_month: number } {
+  return {
+    id: Number(r.id),
+    phone: String(r.phone),
+    rex_id: r.rex_id === null || r.rex_id === undefined ? null : Number(r.rex_id),
+    rex_name: r.rex_name ?? null,
+    added_by_user_id:
+      r.added_by_user_id === null || r.added_by_user_id === undefined ? null : Number(r.added_by_user_id),
+    token_expires_at:
+      r.token_expires_at === null || r.token_expires_at === undefined ? null : Number(r.token_expires_at),
+    refresh_expires_at:
+      r.refresh_expires_at === null || r.refresh_expires_at === undefined ? null : Number(r.refresh_expires_at),
+    subscription_id: r.subscription_id ?? null,
+    balance: r.balance === null || r.balance === undefined ? null : Number(r.balance),
+    balance_checked_at:
+      r.balance_checked_at === null || r.balance_checked_at === undefined ? null : Number(r.balance_checked_at),
+    bill_expire_at: r.bill_expire_at ?? null,
+    block_one_way: r.block_one_way ?? null,
+    block_two_way: r.block_two_way ?? null,
+    sim_status_text: r.sim_status_text ?? null,
+    status: String(r.status),
+    note: r.note ?? null,
+    created_at: Number(r.created_at),
+    updated_at: Number(r.updated_at),
+    volume_today: Number(r.volume_today ?? 0),
+    volume_this_month: Number(r.volume_this_month ?? 0),
+  };
+}
+
+function mapTransferRow(r: any): TransferRow {
+  return {
+    id: Number(r.id),
+    sender_phone: String(r.sender_phone),
+    receiver_phone: String(r.receiver_phone),
+    rex_id: r.rex_id === null || r.rex_id === undefined ? null : Number(r.rex_id),
+    rex_name: r.rex_name ?? null,
+    created_by_user_id:
+      r.created_by_user_id === null || r.created_by_user_id === undefined ? null : Number(r.created_by_user_id),
+    created_by_username: r.created_by_username ?? null,
+    amount: Number(r.amount),
+    fee: Number(r.fee),
+    status: String(r.status),
+    error_code: r.error_code === null || r.error_code === undefined ? null : Number(r.error_code),
+    message: r.message ?? null,
+    created_at: Number(r.created_at),
+  };
 }
 
 function mapUserRow(row: any): UserAuthRow {
@@ -702,32 +761,29 @@ export const dbApi = {
     activeTotal: number;
     counts: TransferSimCounts;
   }> {
-    const scopeClauses: string[] = [];
-    const scopeArgs: unknown[] = [];
-    if (opts?.rexId !== undefined && opts.rexId !== null) {
-      scopeArgs.push(opts.rexId);
-      scopeClauses.push(`s.rex_id = $${scopeArgs.length}`);
-    }
-    const scopeWhere = scopeClauses.length ? `WHERE ${scopeClauses.join(" AND ")}` : "";
-
-    const balanceFilter: TransferBalanceFilter =
-      opts?.balanceFilter === "ready" || opts?.balanceFilter === "low" ? opts.balanceFilter : "all";
-
-    const clauses = [...scopeClauses];
-    const args = [...scopeArgs];
+    const args: unknown[] = [];
     const push = (v: unknown) => {
       args.push(v);
       return `$${args.length}`;
     };
 
+    const rexParam = opts?.rexId !== undefined && opts.rexId !== null ? push(opts.rexId) : null;
+    const scopeWhere = rexParam ? `WHERE s.rex_id = ${rexParam}` : "";
+    const mvRexClause = rexParam ? `AND t.rex_id = ${rexParam}` : "";
+    const readyMinParam = push(TRANSFER_READY_MIN_BALANCE);
+
+    const balanceFilter: TransferBalanceFilter =
+      opts?.balanceFilter === "ready" || opts?.balanceFilter === "low" ? opts.balanceFilter : "all";
+
+    const clauses: string[] = rexParam ? [`s.rex_id = ${rexParam}`] : [];
     if (opts?.status) {
       clauses.push(`s.status = ${push(opts.status)}`);
     }
 
     if (balanceFilter === "ready") {
-      clauses.push(`s.status = 'active' AND s.balance IS NOT NULL AND s.balance >= ${push(TRANSFER_READY_MIN_BALANCE)}`);
+      clauses.push(`s.status = 'active' AND s.balance IS NOT NULL AND s.balance >= ${readyMinParam}`);
     } else if (balanceFilter === "low") {
-      clauses.push(`s.status = 'active' AND s.balance IS NOT NULL AND s.balance < ${push(TRANSFER_READY_MIN_BALANCE)}`);
+      clauses.push(`s.status = 'active' AND s.balance IS NOT NULL AND s.balance < ${readyMinParam}`);
     }
 
     const searchRaw = opts?.q?.trim();
@@ -742,42 +798,60 @@ export const dbApi = {
     }
 
     const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
-    const filterArgs = [...args];
+    const needsFilteredCount = Boolean(opts?.status || searchRaw);
 
     const monthStartSec = startOfThisMonth();
     const todayStartSec = startOfToday();
-
-    const rowsArgs = [...filterArgs];
-    const pushRow = (v: unknown) => {
-      rowsArgs.push(v);
-      return `$${rowsArgs.length}`;
-    };
-    const monthStartParam = pushRow(monthStartSec);
-    const todayStartParam = pushRow(todayStartSec);
-    const mvRexClause =
-      opts?.rexId !== undefined && opts.rexId !== null ? `AND t.rex_id = ${pushRow(opts.rexId)}` : "";
+    const monthStartParam = push(monthStartSec);
+    const todayStartParam = push(todayStartSec);
     const headroomAmt = balanceFilter === "ready" ? 5000 : 500;
-    const dailyHeadroomParam = pushRow(DAILY_VOLUME_LIMIT - headroomAmt);
-    const monthlyHeadroomParam = pushRow(MONTHLY_VOLUME_LIMIT - headroomAmt);
-    const dailyCapParam = pushRow(DAILY_VOLUME_LIMIT);
-    const monthlyCapParam = pushRow(MONTHLY_VOLUME_LIMIT);
+    const dailyHeadroomParam = push(DAILY_VOLUME_LIMIT - headroomAmt);
+    const monthlyHeadroomParam = push(MONTHLY_VOLUME_LIMIT - headroomAmt);
+    const dailyCapParam = push(DAILY_VOLUME_LIMIT);
+    const monthlyCapParam = push(MONTHLY_VOLUME_LIMIT);
     const limitVal = Math.max(1, Math.min(2000, opts?.limit ?? 48));
-    const limitParam = pushRow(limitVal);
+    const limitParam = push(limitVal);
 
-    const readyMinParam = `$${scopeArgs.length + 1}`;
-    const [rowsRes, countRes, countsRes] = await Promise.all([
-      query<PublicSimRow & { volume_today: number; volume_this_month: number }>(
-        `WITH month_vol AS (
-           SELECT t.sender_phone,
-                  COALESCE(SUM(t.amount) FILTER (WHERE t.created_at >= ${todayStartParam}), 0)::bigint AS vol_today,
-                  COALESCE(SUM(t.amount), 0)::bigint AS vol_month
-           FROM transfers t
-           WHERE t.status = 'success' AND t.created_at >= ${monthStartParam} ${mvRexClause}
-           GROUP BY t.sender_phone
-         )
+    const res = await query<any>(
+      `WITH scope_counts AS (
+         SELECT
+           COUNT(*)::int AS _cnt_all,
+           COUNT(*) FILTER (WHERE s.status = 'active')::int AS _cnt_active_total,
+           COUNT(*) FILTER (WHERE s.status = 'active' AND s.balance IS NOT NULL AND s.balance >= ${readyMinParam})::int AS _cnt_ready,
+           COUNT(*) FILTER (WHERE s.status = 'active' AND s.balance IS NOT NULL AND s.balance < ${readyMinParam})::int AS _cnt_low
+         FROM sims s
+         ${scopeWhere}
+       ),
+       ${needsFilteredCount ? `filtered_total AS (SELECT COUNT(*)::int AS _filtered_total FROM sims s ${where}),` : ""}
+       month_vol AS (
+         SELECT t.sender_phone,
+                COALESCE(SUM(t.amount) FILTER (WHERE t.created_at >= ${todayStartParam}), 0)::bigint AS vol_today,
+                COALESCE(SUM(t.amount), 0)::bigint AS vol_month
+         FROM transfers t
+         WHERE t.status = 'success' AND t.created_at >= ${monthStartParam} ${mvRexClause}
+         GROUP BY t.sender_phone
+       ),
+       rows_out AS (
          SELECT ${PUBLIC_SIM_COLUMNS},
                 COALESCE(mv.vol_today, 0)::bigint AS volume_today,
-                COALESCE(mv.vol_month, 0)::bigint AS volume_this_month
+                COALESCE(mv.vol_month, 0)::bigint AS volume_this_month,
+                ROW_NUMBER() OVER (
+                  ORDER BY
+                    CASE WHEN s.status = 'active' THEN 0 ELSE 1 END ASC,
+                    CASE
+                      WHEN s.status = 'active'
+                       AND COALESCE(mv.vol_today, 0) <= ${dailyHeadroomParam}
+                       AND COALESCE(mv.vol_month, 0) <= ${monthlyHeadroomParam}
+                      THEN 0
+                      WHEN s.status = 'active'
+                       AND COALESCE(mv.vol_today, 0) < ${dailyCapParam}
+                       AND COALESCE(mv.vol_month, 0) < ${monthlyCapParam}
+                      THEN 1
+                      ELSE 2
+                    END ASC,
+                    s.updated_at DESC,
+                    s.id DESC
+                ) AS _ord
          FROM sims s
          LEFT JOIN rex_groups rg ON rg.id = s.rex_id
          LEFT JOIN month_vol mv ON mv.sender_phone = s.phone
@@ -797,26 +871,23 @@ export const dbApi = {
            END ASC,
            s.updated_at DESC,
            s.id DESC
-         LIMIT ${limitParam}`,
-        rowsArgs
-      ),
-      query<{ c: number }>(
-        `SELECT COUNT(*)::int AS c FROM sims s ${where}`,
-        filterArgs
-      ),
-      query<{ all: number; active_total: number; ready: number; low: number }>(
-        `SELECT
-           COUNT(*)::int AS all,
-           COUNT(*) FILTER (WHERE s.status = 'active')::int AS active_total,
-           COUNT(*) FILTER (WHERE s.status = 'active' AND s.balance IS NOT NULL AND s.balance >= ${readyMinParam})::int AS ready,
-           COUNT(*) FILTER (WHERE s.status = 'active' AND s.balance IS NOT NULL AND s.balance < ${readyMinParam})::int AS low
-         FROM sims s
-         ${scopeWhere}`,
-        [...scopeArgs, TRANSFER_READY_MIN_BALANCE]
-      ),
-    ]);
+         LIMIT ${limitParam}
+       )
+       SELECT
+         sc._cnt_all,
+         sc._cnt_active_total,
+         sc._cnt_ready,
+         sc._cnt_low,
+         ${needsFilteredCount ? "ft._filtered_total" : "NULL::int AS _filtered_total"},
+         ${OUTER_SIM_COLUMNS}
+       FROM scope_counts sc
+       ${needsFilteredCount ? "CROSS JOIN filtered_total ft" : ""}
+       LEFT JOIN rows_out r ON TRUE
+       ORDER BY r._ord ASC NULLS LAST`,
+      args
+    );
 
-    const sims = rowsRes.rows;
+    const sims = res.rows.filter((r) => r.id !== null).map(mapSimSummaryRow);
     const includePhone = opts?.includePhone?.trim();
     if (includePhone && !sims.some((s) => s.phone === includePhone)) {
       const incArgs: unknown[] = [includePhone];
@@ -854,24 +925,29 @@ export const dbApi = {
         incArgs
       );
       if (incRes.rows[0]) {
-        sims.unshift(incRes.rows[0]);
+        sims.unshift(mapSimSummaryRow(incRes.rows[0]));
       }
     }
 
-    const cRow = countsRes.rows[0];
+    const first = res.rows[0];
+    const counts: TransferSimCounts = {
+      all: Number(first?._cnt_all ?? 0),
+      ready: Number(first?._cnt_ready ?? 0),
+      low: Number(first?._cnt_low ?? 0),
+    };
+    const total = needsFilteredCount
+      ? Number(first?._filtered_total ?? sims.length)
+      : balanceFilter === "ready"
+        ? counts.ready
+        : balanceFilter === "low"
+          ? counts.low
+          : counts.all;
+
     return {
-      sims: sims.map((s) => ({
-        ...s,
-        volume_today: Number(s.volume_today ?? 0),
-        volume_this_month: Number(s.volume_this_month ?? 0),
-      })),
-      total: countRes.rows[0]?.c ?? sims.length,
-      activeTotal: cRow?.active_total ?? 0,
-      counts: {
-        all: cRow?.all ?? 0,
-        ready: cRow?.ready ?? 0,
-        low: cRow?.low ?? 0,
-      },
+      sims,
+      total,
+      activeTotal: Number(first?._cnt_active_total ?? 0),
+      counts,
     };
   },
 
@@ -887,33 +963,36 @@ export const dbApi = {
       expired: number;
     };
   }> {
-    const scopeClauses: string[] = [];
-    const scopeArgs: unknown[] = [];
-    if (q.rexId !== undefined && q.rexId !== null) {
-      scopeArgs.push(q.rexId);
-      scopeClauses.push(`s.rex_id = $${scopeArgs.length}`);
-    }
-    const scopeWhere = scopeClauses.length ? `WHERE ${scopeClauses.join(" AND ")}` : "";
-
-    const lowParamIdx = scopeArgs.length + 1;
-    const daysParamIdx = scopeArgs.length + 2;
-
-    const clauses: string[] = [...scopeClauses];
-    const args = [...scopeArgs];
+    const args: unknown[] = [];
     const push = (v: unknown) => {
       args.push(v);
       return `$${args.length}`;
     };
 
+    const rexParam = q.rexId !== undefined && q.rexId !== null ? push(q.rexId) : null;
+    const scopeWhere = rexParam ? `WHERE s.rex_id = ${rexParam}` : "";
+    const lowParam = push(LOW_BALANCE_THRESHOLD);
+    const daysParam = push(EXPIRING_SOON_DAYS);
+
+    const clauses: string[] = rexParam ? [`s.rex_id = ${rexParam}`] : [];
+    let viewKey: "all" | "active" | "inactive" | "drained" | "expiring" | "expired" = "all";
+
     if (q.view === "active") {
+      viewKey = "active";
       clauses.push(`s.status = 'active'`);
     } else if (q.view === "inactive") {
+      viewKey = "inactive";
       clauses.push(`s.status <> 'active'`);
     } else if (q.view === "drained") {
-      clauses.push(`s.status = 'active' AND s.balance IS NOT NULL AND s.balance < ${push(LOW_BALANCE_THRESHOLD)}`);
+      viewKey = "drained";
+      clauses.push(`s.status = 'active' AND s.balance IS NOT NULL AND s.balance < ${lowParam}`);
     } else if (q.view === "expiring") {
-      clauses.push(`s.bill_expire_date IS NOT NULL AND s.bill_expire_date > ${TODAY_MM_SQL} AND (s.bill_expire_date - ${TODAY_MM_SQL}) <= ${push(EXPIRING_SOON_DAYS)}`);
+      viewKey = "expiring";
+      clauses.push(
+        `s.bill_expire_date IS NOT NULL AND s.bill_expire_date > ${TODAY_MM_SQL} AND (s.bill_expire_date - ${TODAY_MM_SQL}) <= ${daysParam}`
+      );
     } else if (q.view === "expired") {
+      viewKey = "expired";
       clauses.push(`s.bill_expire_date IS NOT NULL AND s.bill_expire_date <= ${TODAY_MM_SQL}`);
     }
 
@@ -931,7 +1010,7 @@ export const dbApi = {
     }
 
     const whereSql = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
-    const totalArgs = [...args];
+    const needsFilteredCount = Boolean(searchRaw);
 
     let orderSql = "s.updated_at DESC, s.id DESC";
     if (q.sort === "balance-asc") {
@@ -942,54 +1021,41 @@ export const dbApi = {
       orderSql = "CASE WHEN s.bill_expire_date IS NULL THEN 1 ELSE 0 END ASC, s.bill_expire_date ASC, s.updated_at DESC";
     }
 
-    const rowsArgs = [...totalArgs];
-    const pushRow = (v: unknown) => {
-      rowsArgs.push(v);
-      return `$${rowsArgs.length}`;
-    };
-    const limitParam = pushRow(q.pageSize);
-    const offsetParam = pushRow((Math.max(1, q.page) - 1) * q.pageSize);
-    const monthStartParam = pushRow(startOfThisMonth());
-    const todayStartParam = pushRow(startOfToday());
+    const limitParam = push(q.pageSize);
+    const offsetParam = push((Math.max(1, q.page) - 1) * q.pageSize);
+    const monthStartParam = push(startOfThisMonth());
+    const todayStartParam = push(startOfToday());
 
-    const [countsRes, totalRes, rowsRes] = await Promise.all([
-      query<{
-        all: number;
-        active: number;
-        inactive: number;
-        drained: number;
-        expiring: number;
-        expired: number;
-      }>(
-        `SELECT
-           COUNT(*)::int AS all,
-           COUNT(*) FILTER (WHERE s.status = 'active')::int AS active,
-           COUNT(*) FILTER (WHERE s.status <> 'active')::int AS inactive,
-           COUNT(*) FILTER (WHERE s.status = 'active' AND s.balance IS NOT NULL AND s.balance < $${lowParamIdx})::int AS drained,
-           COUNT(*) FILTER (WHERE s.bill_expire_date IS NOT NULL AND s.bill_expire_date > ${TODAY_MM_SQL} AND (s.bill_expire_date - ${TODAY_MM_SQL}) <= $${daysParamIdx})::int AS expiring,
-           COUNT(*) FILTER (WHERE s.bill_expire_date IS NOT NULL AND s.bill_expire_date <= ${TODAY_MM_SQL})::int AS expired
+    const res = await query<any>(
+      `WITH scope_counts AS (
+         SELECT
+           COUNT(*)::int AS _cnt_all,
+           COUNT(*) FILTER (WHERE s.status = 'active')::int AS _cnt_active,
+           COUNT(*) FILTER (WHERE s.status <> 'active')::int AS _cnt_inactive,
+           COUNT(*) FILTER (WHERE s.status = 'active' AND s.balance IS NOT NULL AND s.balance < ${lowParam})::int AS _cnt_drained,
+           COUNT(*) FILTER (WHERE s.bill_expire_date IS NOT NULL AND s.bill_expire_date > ${TODAY_MM_SQL} AND (s.bill_expire_date - ${TODAY_MM_SQL}) <= ${daysParam})::int AS _cnt_expiring,
+           COUNT(*) FILTER (WHERE s.bill_expire_date IS NOT NULL AND s.bill_expire_date <= ${TODAY_MM_SQL})::int AS _cnt_expired
          FROM sims s
-         ${scopeWhere}`,
-        [...scopeArgs, LOW_BALANCE_THRESHOLD, EXPIRING_SOON_DAYS]
-      ),
-      query<{ c: number }>(
-        `SELECT COUNT(*)::int AS c
+         ${scopeWhere}
+       ),
+       ${needsFilteredCount ? `filtered_total AS (
+         SELECT COUNT(*)::int AS _filtered_total
          FROM sims s
-         ${searchRaw ? "LEFT JOIN rex_groups rg ON rg.id = s.rex_id" : ""}
-         ${whereSql}`,
-        totalArgs
-      ),
-      query<PublicSimRow & { volume_today: number; volume_this_month: number }>(
-        `WITH paged AS (
-           SELECT ${PUBLIC_SIM_COLUMNS},
-                  ROW_NUMBER() OVER (ORDER BY ${orderSql}) AS _ord
-           FROM sims s
-           LEFT JOIN rex_groups rg ON rg.id = s.rex_id
-           ${whereSql}
-           ORDER BY ${orderSql}
-           LIMIT ${limitParam} OFFSET ${offsetParam}
-         )
+         LEFT JOIN rex_groups rg ON rg.id = s.rex_id
+         ${whereSql}
+       ),` : ""}
+       paged AS (
+         SELECT ${PUBLIC_SIM_COLUMNS},
+                ROW_NUMBER() OVER (ORDER BY ${orderSql}) AS _ord
+         FROM sims s
+         LEFT JOIN rex_groups rg ON rg.id = s.rex_id
+         ${whereSql}
+         ORDER BY ${orderSql}
+         LIMIT ${limitParam} OFFSET ${offsetParam}
+       ),
+       rows_out AS (
          SELECT ${PAGED_SIM_PROJECTION},
+                p._ord,
                 COALESCE(v.vol_today, 0)::bigint AS volume_today,
                 COALESCE(v.vol_month, 0)::bigint AS volume_this_month
          FROM paged p
@@ -999,27 +1065,36 @@ export const dbApi = {
            FROM transfers t
            WHERE t.status = 'success' AND t.created_at >= ${monthStartParam} AND t.sender_phone = p.phone
          ) v ON TRUE
-         ORDER BY p._ord ASC`,
-        rowsArgs
-      ),
-    ]);
+       )
+       SELECT
+         sc._cnt_all,
+         sc._cnt_active,
+         sc._cnt_inactive,
+         sc._cnt_drained,
+         sc._cnt_expiring,
+         sc._cnt_expired,
+         ${needsFilteredCount ? "ft._filtered_total" : "NULL::int AS _filtered_total"},
+         ${OUTER_SIM_COLUMNS}
+       FROM scope_counts sc
+       ${needsFilteredCount ? "CROSS JOIN filtered_total ft" : ""}
+       LEFT JOIN rows_out r ON TRUE
+       ORDER BY r._ord ASC NULLS LAST`,
+      args
+    );
 
-    const counts = countsRes.rows[0] ?? {
-      all: 0,
-      active: 0,
-      inactive: 0,
-      drained: 0,
-      expiring: 0,
-      expired: 0,
+    const first = res.rows[0];
+    const counts = {
+      all: Number(first?._cnt_all ?? 0),
+      active: Number(first?._cnt_active ?? 0),
+      inactive: Number(first?._cnt_inactive ?? 0),
+      drained: Number(first?._cnt_drained ?? 0),
+      expiring: Number(first?._cnt_expiring ?? 0),
+      expired: Number(first?._cnt_expired ?? 0),
     };
-    const total = totalRes.rows[0]?.c ?? 0;
+    const total = needsFilteredCount ? Number(first?._filtered_total ?? 0) : counts[viewKey];
 
     return {
-      sims: rowsRes.rows.map((s) => ({
-        ...s,
-        volume_today: Number(s.volume_today ?? 0),
-        volume_this_month: Number(s.volume_this_month ?? 0),
-      })),
+      sims: res.rows.filter((r) => r.id !== null).map(mapSimSummaryRow),
       total,
       counts,
     };
@@ -1084,7 +1159,7 @@ export const dbApi = {
 
     invalidateRexCache();
     const updated = (await this.getSim(phone))!;
-    sse.emit("update", { kind: "sync", rexId: updated.rex_id });
+    sse.emit("update", { kind: "sync", scope: "sims", rexId: updated.rex_id });
     return updated;
   },
 
@@ -1105,7 +1180,7 @@ export const dbApi = {
       for (const r of prevRexRes.rows) notified.add(r.rex_id);
       notified.add(targetRexId);
       for (const rexId of notified) {
-        sse.emit("update", { kind: "sync", rexId });
+        sse.emit("update", { kind: "sync", scope: "sims", rexId });
       }
     }
     return moved;
@@ -1129,7 +1204,7 @@ export const dbApi = {
     if (removed > 0) {
       invalidateRexCache();
       for (const r of rexRes.rows) {
-        sse.emit("update", { kind: "sync", rexId: r.rex_id });
+        sse.emit("update", { kind: "sync", scope: "sims", rexId: r.rex_id });
       }
     }
     return removed;
@@ -1143,7 +1218,7 @@ export const dbApi = {
       [amount, now(), phone]
     );
     if ((res.rowCount ?? 0) > 0) {
-      sse.emit("update", { kind: "sync", rexId: res.rows[0].rex_id });
+      sse.emit("update", { kind: "sync", scope: "sim_balance", rexId: res.rows[0].rex_id });
     }
   },
 
@@ -1178,7 +1253,7 @@ export const dbApi = {
         ts,
       ]
     );
-    sse.emit("update", { kind: "sync", rexId: t.rex_id ?? null });
+    sse.emit("update", { kind: "sync", scope: "transfers", rexId: t.rex_id ?? null });
     return (await this.getTransferById(res.rows[0].id))!;
   },
 
@@ -1202,6 +1277,7 @@ export const dbApi = {
     if (fields.status === "success" || fields.status === "failed") {
       sse.emit("update", {
         kind: "transfer:result",
+        scope: "transfers",
         rexId: row?.rex_id ?? null,
         id,
         status: fields.status,
@@ -1211,7 +1287,7 @@ export const dbApi = {
         message: fields.message ?? row?.message ?? null,
       });
     } else {
-      sse.emit("update", { kind: "sync", rexId: row?.rex_id ?? null });
+      sse.emit("update", { kind: "sync", scope: "transfers", rexId: row?.rex_id ?? null });
     }
   },
 
@@ -1247,23 +1323,31 @@ export const dbApi = {
     offset: number
   ): Promise<{ rows: TransferRow[]; total: number }> {
     const { sql, args } = transfersWhereClause(f);
-    const [rowsRes, countRes] = await Promise.all([
-      query<TransferRow>(
-        `SELECT ${TRANSFER_COLUMNS}
+    const limitParam = `$${args.length + 1}`;
+    const offsetParam = `$${args.length + 2}`;
+    const res = await query<any>(
+      `WITH total_cte AS (
+         SELECT COUNT(*)::int AS _total FROM transfers t ${sql}
+       ),
+       rows_out AS (
+         SELECT ${TRANSFER_COLUMNS},
+                ROW_NUMBER() OVER (ORDER BY t.created_at DESC, t.id DESC) AS _ord
          FROM transfers t
          LEFT JOIN rex_groups rg ON rg.id = t.rex_id
          LEFT JOIN users u ON u.id = t.created_by_user_id
          ${sql}
          ORDER BY t.created_at DESC, t.id DESC
-         LIMIT $${args.length + 1} OFFSET $${args.length + 2}`,
-        [...args, limit, offset]
-      ),
-      query<{ c: number }>(
-        `SELECT COUNT(*)::int AS c FROM transfers t ${sql}`,
-        args
-      ),
-    ]);
-    return { rows: rowsRes.rows, total: countRes.rows[0]?.c ?? 0 };
+         LIMIT ${limitParam} OFFSET ${offsetParam}
+       )
+       SELECT tc._total, ${OUTER_TRANSFER_COLUMNS}
+       FROM total_cte tc
+       LEFT JOIN rows_out r ON TRUE
+       ORDER BY r._ord ASC NULLS LAST`,
+      [...args, limit, offset]
+    );
+    const total = Number(res.rows[0]?._total ?? 0);
+    const rows = res.rows.filter((r) => r.id !== null).map(mapTransferRow);
+    return { rows, total };
   },
 
   async listTransfersExportBatch(
@@ -1296,7 +1380,7 @@ export const dbApi = {
   async deleteTransfer(id: number): Promise<void> {
     const row = await this.getTransferById(id);
     await query(`DELETE FROM transfers WHERE id = $1`, [id]);
-    sse.emit("update", { kind: "sync", rexId: row?.rex_id ?? null });
+    sse.emit("update", { kind: "sync", scope: "transfers", rexId: row?.rex_id ?? null });
   },
 
   async todayVolumeBySender(phones?: string[], rexId?: number | null): Promise<Record<string, number>> {
@@ -1514,13 +1598,16 @@ export const dbApi = {
     return res.rows;
   },
 
-  async trayStats(rexId?: number | null) {
+  async trayStats(rexId?: number | null, opts?: { includeRecent?: boolean }) {
     const args: unknown[] = [];
-    const simWhere = rexId !== undefined && rexId !== null ? `WHERE rex_id = $1` : "";
-    if (rexId !== undefined && rexId !== null) args.push(rexId);
+    const hasRex = rexId !== undefined && rexId !== null;
+    if (hasRex) args.push(rexId);
+    const simWhere = hasRex ? `WHERE rex_id = $1` : "";
+    const transferWhere = hasRex ? `WHERE t.rex_id = $1` : "";
+    const includeRecent = opts?.includeRecent ?? true;
 
-    const [simStatsRes, recent] = await Promise.all([
-      query<{ sim_count: number; logged_in: number; total_balance: number }>(
+    if (!includeRecent) {
+      const simStatsRes = await query<{ sim_count: number; logged_in: number; total_balance: number }>(
         `SELECT
            COUNT(*)::int AS sim_count,
            COUNT(*) FILTER (WHERE status = 'active')::int AS logged_in,
@@ -1528,16 +1615,48 @@ export const dbApi = {
          FROM sims
          ${simWhere}`,
         args
-      ),
-      this.listTransfers(5, undefined, undefined, rexId),
-    ]);
+      );
+      const s = simStatsRes.rows[0] ?? { sim_count: 0, logged_in: 0, total_balance: 0 };
+      return {
+        simCount: Number(s.sim_count),
+        loggedIn: Number(s.logged_in),
+        totalBalance: Number(s.total_balance),
+        recent: [] as TransferRow[],
+      };
+    }
 
-    const s = simStatsRes.rows[0] ?? { sim_count: 0, logged_in: 0, total_balance: 0 };
+    const res = await query<any>(
+      `WITH sim_stats AS (
+         SELECT
+           COUNT(*)::int AS _sim_count,
+           COUNT(*) FILTER (WHERE status = 'active')::int AS _logged_in,
+           COALESCE(SUM(balance) FILTER (WHERE status = 'active'), 0)::bigint AS _total_balance
+         FROM sims
+         ${simWhere}
+       ),
+       recent_rows AS (
+         SELECT ${TRANSFER_COLUMNS},
+                ROW_NUMBER() OVER (ORDER BY t.created_at DESC, t.id DESC) AS _ord
+         FROM transfers t
+         LEFT JOIN rex_groups rg ON rg.id = t.rex_id
+         LEFT JOIN users u ON u.id = t.created_by_user_id
+         ${transferWhere}
+         ORDER BY t.created_at DESC, t.id DESC
+         LIMIT 5
+       )
+       SELECT ss._sim_count, ss._logged_in, ss._total_balance, ${OUTER_TRANSFER_COLUMNS}
+       FROM sim_stats ss
+       LEFT JOIN recent_rows r ON TRUE
+       ORDER BY r._ord ASC NULLS LAST`,
+      args
+    );
+
+    const first = res.rows[0];
     return {
-      simCount: Number(s.sim_count),
-      loggedIn: Number(s.logged_in),
-      totalBalance: Number(s.total_balance),
-      recent,
+      simCount: Number(first?._sim_count ?? 0),
+      loggedIn: Number(first?._logged_in ?? 0),
+      totalBalance: Number(first?._total_balance ?? 0),
+      recent: res.rows.filter((r) => r.id !== null).map(mapTransferRow),
     };
   },
 };

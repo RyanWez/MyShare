@@ -17,7 +17,7 @@ import { SegmentedControl, type SegmentedOption } from "@/components/ui/Segmente
 import { fmtAmount, fmtKs, fmtPhoneGrouped, fmtStamp } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { fetchSims, invalidateCache } from "@/lib/api";
-import { useLive } from "@/lib/liveEvents";
+import { isSimStateUpdate, useLive } from "@/lib/liveEvents";
 import { CooldownSeconds, useCooldownActive } from "@/components/Cooldown";
 import { useSessionState } from "@/lib/useSessionState";
 import { useLocalState } from "@/lib/useLocalState";
@@ -164,12 +164,15 @@ export default function TransferPage() {
 
   const loadSimsRef = useRef(loadSims);
   loadSimsRef.current = loadSims;
-  useLive(() => {
-    if (stageRef.current === "form" && !busyRef.current) {
-      invalidateCache("sims");
-      void loadSimsRef.current(true);
-    }
-  });
+  useLive(
+    () => {
+      if (stageRef.current === "form" && !busyRef.current) {
+        invalidateCache("sims");
+        void loadSimsRef.current(true);
+      }
+    },
+    { accept: isSimStateUpdate }
+  );
 
   const balanceFilterOptions = useMemo<SegmentedOption<TransferBalanceFilter>[]>(
     () => [

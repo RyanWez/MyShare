@@ -49,9 +49,17 @@ export async function GET(req: NextRequest) {
   const rexId = resolveScopedRexId(auth.user, req.nextUrl.searchParams.get("rexId"));
   const { from, to, granularity } = resolveRange(req);
 
+  const needSeries =
+    ov.transfersChart ||
+    ov.volumeChart ||
+    ov.successMetric ||
+    ov.topErrorsChart ||
+    ov.volumeMetric ||
+    ov.netVolumeMetric;
+
   const [buckets, tray, topErrors] = await Promise.all([
-    dbApi.rangeSeries(from, to, granularity, rexId),
-    dbApi.trayStats(rexId),
+    needSeries ? dbApi.rangeSeries(from, to, granularity, rexId) : Promise.resolve([]),
+    dbApi.trayStats(rexId, { includeRecent: ov.recentList }),
     ov.topErrorsChart ? dbApi.topErrors(from, to, rexId) : Promise.resolve([]),
   ]);
 

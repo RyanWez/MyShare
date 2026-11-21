@@ -26,7 +26,8 @@ npm run dev        # http://localhost:3100
 | Variable | Default | Purpose |
 |---|---|---|
 | `TOKEN_ENC_KEY` | `AUTH_SECRET` | AES-256-GCM key material for encrypting stored SIM tokens |
-| `PG_POOL_MAX` | `10` | Max PostgreSQL pool connections per app instance |
+| `PG_POOL_MAX` | `4` | Max PostgreSQL pool connections per app instance |
+| `PG_IDLE_TIMEOUT_MS` | `120000` (`4000` for `-pooler`/`:6543`) | Idle connection timeout before pool eviction |
 | `PG_SSL_CA` | — | Optional PEM CA certificate if strict TLS verification is used |
 | `LOGIN_MAX_ATTEMPTS` | `10` | Failed console logins per IP per 15 min |
 | `LOGIN_MAX_ATTEMPTS_GLOBAL` | `60` | Failed console logins overall per 15 min |

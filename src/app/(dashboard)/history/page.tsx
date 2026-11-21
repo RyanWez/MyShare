@@ -30,7 +30,7 @@ import {
 } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { ApiError, fetchHistoryPage, invalidateCache, type HistoryPage } from "@/lib/api";
-import { useLive } from "@/lib/liveEvents";
+import { isTransferUpdate, useLive } from "@/lib/liveEvents";
 import { useSession } from "@/components/SessionProvider";
 import type { Transfer } from "@/lib/types";
 
@@ -288,7 +288,7 @@ export default function HistoryPage() {
   useEffect(() => {
     fetchRef.current = runFetch;
   });
-  useLive(() => fetchRef.current({ bypass: true }));
+  useLive(() => fetchRef.current({ bypass: true }), { accept: isTransferUpdate });
 
   // Deletions can strand us past the last page; fall back onto it.
   useEffect(() => {

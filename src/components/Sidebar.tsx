@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { StatusDot } from "@/components/ui/StatusDot";
-import { useLive, useLiveStatus, type LiveStatus } from "@/lib/liveEvents";
+import { isSimInventoryUpdate, useLive, useLiveStatus, type LiveStatus } from "@/lib/liveEvents";
 import { useSession } from "@/components/SessionProvider";
 import { fetchFleetCounts, invalidateCache } from "@/lib/api";
 
@@ -155,10 +155,13 @@ export default function Sidebar({ open, onClose, collapsed = false, onToggleColl
     loadFleet();
   }, [loadFleet]);
 
-  useLive(() => {
-    invalidateCache("fleet");
-    loadFleet(true);
-  });
+  useLive(
+    () => {
+      invalidateCache("fleet");
+      loadFleet(true);
+    },
+    { accept: isSimInventoryUpdate }
+  );
 
   return (
     <>

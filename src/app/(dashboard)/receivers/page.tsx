@@ -12,7 +12,7 @@ import { DateRangePicker, type DateRange } from "@/components/ui/DateRangePicker
 import { fmtAmount, fmtClock, fmtPhone, fmtPhoneGrouped, phoneSearchKeys } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { ApiError, fetchReceivers, fetchReceiverTransfers, invalidateCache } from "@/lib/api";
-import { useLive } from "@/lib/liveEvents";
+import { isTransferUpdate, useLive } from "@/lib/liveEvents";
 import { useSession } from "@/components/SessionProvider";
 import { toast } from "sonner";
 import type { ReceiverGroup, Transfer } from "@/lib/types";
@@ -227,7 +227,7 @@ export default function ReceiversPage() {
   useEffect(() => {
     fetchRef.current = runFetch;
   });
-  useLive(() => fetchRef.current({ bypass: true }));
+  useLive(() => fetchRef.current({ bypass: true }), { accept: isTransferUpdate });
 
   // The sender filter resolves server-side, so what arrives is already scoped;
   // the receiver search and the thresholds stay here to answer every keystroke.

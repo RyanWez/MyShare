@@ -25,7 +25,7 @@ import { fetchSimsPage, invalidateCache, ApiError } from "@/lib/api";
 import { LOW_BALANCE_THRESHOLD } from "@/lib/constants";
 import { hasUnlimitedRefresh } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
-import { useLive } from "@/lib/liveEvents";
+import { isSimStateUpdate, useLive } from "@/lib/liveEvents";
 import { useSessionState } from "@/lib/useSessionState";
 import { useSession } from "@/components/SessionProvider";
 import { CooldownSeconds, useCooldownActive } from "@/components/Cooldown";
@@ -154,10 +154,13 @@ export default function SimsPage() {
   useEffect(() => {
     loadRef.current = load;
   });
-  useLive(() => {
-    invalidateCache("sims");
-    loadRef.current(true);
-  });
+  useLive(
+    () => {
+      invalidateCache("sims");
+      loadRef.current(true);
+    },
+    { accept: isSimStateUpdate }
+  );
 
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const currentPage = Math.min(Math.max(1, page), pageCount);

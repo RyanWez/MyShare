@@ -12,9 +12,19 @@ import { useEffect, useRef, useSyncExternalStore } from "react";
 
 export type LiveStatus = "connecting" | "online" | "offline";
 
+export type LiveScope = "sims" | "sim_balance" | "transfers";
+
 /** Structured payloads the server may attach to an "update" event. */
+export interface SyncUpdate {
+  kind: "sync";
+  scope?: LiveScope;
+  rexId?: number | null;
+}
+
 export interface TransferResultUpdate {
   kind: "transfer:result";
+  scope?: LiveScope;
+  rexId?: number | null;
   id: number;
   status: "success" | "failed";
   sender: string;
@@ -23,7 +33,24 @@ export interface TransferResultUpdate {
   message?: string | null;
 }
 
-export type LiveUpdate = TransferResultUpdate;
+export type LiveUpdate = TransferResultUpdate | SyncUpdate;
+
+export function isSimInventoryUpdate(u?: LiveUpdate): boolean {
+  return !u?.scope || u.scope === "sims";
+}
+
+export function isSimStateUpdate(u?: LiveUpdate): boolean {
+  return (
+    !u?.scope ||
+    u.scope === "sims" ||
+    u.scope === "sim_balance" ||
+    (u.kind === "transfer:result" && u.status === "success")
+  );
+}
+
+export function isTransferUpdate(u?: LiveUpdate): boolean {
+  return !u?.scope || u.scope === "transfers";
+}
 
 export interface UseLiveOptions {
   /** Deliver every event synchronously without debouncing (e.g. OS notifications). */
@@ -32,6 +59,8 @@ export interface UseLiveOptions {
   debounceMs?: number;
   /** Skip refetches while tab is hidden and fire once when visible again (default true). */
   pauseWhenHidden?: boolean;
+  /** Pre-debounce predicate; returning false skips irrelevant updates without resetting timers. */
+  accept?: (u?: LiveUpdate) => boolean;
 }
 
 let es: EventSource | null = null;
@@ -134,6 +163,8 @@ function useLiveInternal(
 ): LiveStatus {
   const cbRef = useRef<((u?: LiveUpdate) => void) | undefined>(onUpdate);
   cbRef.current = onUpdate;
+  const acceptRef = useRef<((u?: LiveUpdate) => boolean) | undefined>(options?.accept);
+  acceptRef.current = options?.accept;
 
   const immediate = options?.immediate ?? false;
   const debounceMs = options?.debounceMs ?? 550;
@@ -145,6 +176,7 @@ function useLiveInternal(
 
     if (immediate) {
       const fn = (u?: LiveUpdate) => {
+        if (acceptRef.current && !acceptRef.current(u)) return;
         if (pauseWhenHidden && document.visibilityState === "hidden") return;
         cbRef.current?.(u);
       };
@@ -167,6 +199,7 @@ function useLiveInternal(
     };
 
     const fn = (u?: LiveUpdate) => {
+      if (acceptRef.current && !acceptRef.current(u)) return;
       lastUpdate = u;
       if (pauseWhenHidden && document.visibilityState === "hidden") {
         pendingWhileHidden = true;

@@ -28,19 +28,35 @@ function createPool(): Pool {
 
   const ca = process.env.PG_SSL_CA?.replace(/\\n/g, "\n");
   const useSsl = sslMode !== "disable";
+  // Managed transaction poolers (e.g. Neon -pooler, Supabase Supavisor :6543) drop idle
+  // server sockets quickly, while direct Postgres servers keep per-connection OS processes.
+  const isExternalPooler =
+    parsed.hostname.includes("-pooler") || parsed.port === "6543";
+  const maxConnections = Math.max(1, Number(process.env.PG_POOL_MAX) || 4);
+  const idleTimeoutMs =
+    Number(process.env.PG_IDLE_TIMEOUT_MS) || (isExternalPooler ? 4_000 : 120_000);
 
-  return new Pool({
+  const pool = new Pool({
     connectionString: parsed.toString(),
     ssl: useSsl
       ? ca
         ? { ca, rejectUnauthorized: true }
         : { rejectUnauthorized: false }
       : false,
-    max: Number(process.env.PG_POOL_MAX) || 10,
-    idleTimeoutMillis: 30_000,
+    max: maxConnections,
+    idleTimeoutMillis: idleTimeoutMs,
     connectionTimeoutMillis: 10_000,
     query_timeout: 15_000,
+    keepAlive: !isExternalPooler,
+    keepAliveInitialDelayMillis: 10_000,
   });
+
+  // Prevent unhandled EventEmitter errors on idle clients when the DB/pooler closes sockets.
+  pool.on("error", (err) => {
+    console.error("[pg] Idle pool client error:", err?.message || err);
+  });
+
+  return pool;
 }
 
 export function getPool(): Pool {
@@ -196,12 +212,14 @@ async function initSchemaAndSeed(): Promise<void> {
 
     const ts = nowSec();
 
-    // Seed system roles idempotently
+    // Seed system roles idempotently (skip update if unchanged to avoid dead tuples on cold starts)
     await client.query(
       `INSERT INTO roles (name, name_lower, is_system, permissions, created_at, updated_at)
        VALUES ($1, $2, TRUE, $3::jsonb, $4, $4)
        ON CONFLICT (name_lower) DO UPDATE
-       SET is_system = TRUE, permissions = EXCLUDED.permissions, updated_at = EXCLUDED.updated_at`,
+       SET is_system = TRUE, permissions = EXCLUDED.permissions, updated_at = EXCLUDED.updated_at
+       WHERE roles.is_system IS DISTINCT FROM TRUE
+          OR roles.permissions IS DISTINCT FROM EXCLUDED.permissions`,
       ["Admin", "admin", JSON.stringify(DEFAULT_ADMIN_PERMISSIONS), ts]
     );
 
