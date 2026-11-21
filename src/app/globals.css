@@ -106,6 +106,17 @@
     --notch-size: 20px;
   }
 
+  /* Lift offset for selected SIM chip + gliding frame — zeroed when reduced motion is requested. */
+  .sim-chip-surface {
+    --sim-lift: 0px;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .sim-chip-surface {
+      --sim-lift: -2px;
+    }
+  }
+
   .tnum {
     font-variant-numeric: tabular-nums;
   }

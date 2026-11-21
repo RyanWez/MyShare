@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { RefreshCw, Trash2, LogIn, Cpu, CheckCircle2, CalendarClock } from "lucide-react";
+import { RefreshCw, Trash2, LogIn, Cpu, Check, CheckCircle2, CalendarClock } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Panel } from "@/components/ui/Panel";
 import { StatusDot } from "@/components/ui/StatusDot";
@@ -266,50 +266,238 @@ const SimCard = React.memo(function SimCard({
 export interface SimChipProps {
   sim: Sim;
   selected: boolean;
+  locked?: boolean;
   onSelect: (sim: Sim) => void;
 }
 
-function SimChip({ sim, selected, onSelect }: SimChipProps) {
+function SimChip({ sim, selected, locked = false, onSelect }: SimChipProps) {
   const active = sim.status === "active";
   const atLimit = sim.volume_today >= DAILY_VOLUME_LIMIT || sim.volume_this_month >= MONTHLY_VOLUME_LIMIT;
 
   return (
-    <Panel
-      as="button"
-      type="button"
-      notch="sm"
-      active={selected}
-      disabled={!active}
-      onClick={() => onSelect(sim)}
-      aria-pressed={selected}
-      contentClassName={cn("px-3.5 py-3 text-left", !active && "bg-substrate")}
-      className="w-full text-left"
+    <div
+      data-sim-phone={sim.phone}
+      className={cn(
+        "relative transition-[transform,filter] duration-300 ease-out motion-reduce:transition-none",
+        selected && "drop-shadow-[0_6px_16px_rgb(var(--brass)/0.22)]"
+      )}
+      style={selected ? { transform: "translate3d(0, var(--sim-lift), 0)" } : undefined}
     >
-      <div className="flex items-center gap-2">
-        <StatusDot tone={active ? "signal" : "muted"} size="sm" pulse={active} />
-        <span className="font-mono text-xs tnum text-ink-soft">{fmtPhoneGrouped(sim.phone)}</span>
-      </div>
-      <div className="mt-1.5 font-mono text-lg tnum text-brass-deep">
-        {active && sim.balance !== null ? (
-          fmtAmount(sim.balance)
-        ) : (
-          <span className="text-sm text-ink-faint">
-            {active ? "No balance read" : statusBadge(sim.status).label}
+      <Panel
+        as="button"
+        type="button"
+        notch="sm"
+        active={selected}
+        disabled={!active}
+        onClick={() => onSelect(sim)}
+        aria-pressed={selected}
+        contentClassName={cn(
+          "relative overflow-hidden px-3.5 py-3 text-left transition-colors duration-300",
+          !active && "bg-substrate"
+        )}
+        className={cn(
+          "w-full text-left transition-colors duration-300",
+          active && !selected && !locked && "motion-safe:active:scale-[0.985]",
+          locked && "cursor-default"
+        )}
+      >
+        {/* Warm brass tint + left accent bar fade in smoothly on the selected card. */}
+        <span
+          aria-hidden="true"
+          className={cn(
+            "pointer-events-none absolute inset-0 bg-gradient-to-br from-brass/15 via-brass-wash/45 to-transparent dark:from-brass/20 dark:via-brass-wash/55 transition-opacity duration-300 ease-out",
+            selected ? "opacity-100" : "opacity-0"
+          )}
+        />
+        <span
+          aria-hidden="true"
+          className={cn(
+            "pointer-events-none absolute inset-y-0 left-0 w-[3px] bg-brass transition-opacity duration-300 ease-out",
+            selected ? "opacity-100" : "opacity-0"
+          )}
+        />
+
+        <div className="relative z-10 flex min-h-[20px] items-center justify-between gap-2">
+          <span className="flex min-w-0 items-center gap-2">
+            <StatusDot tone={active ? "signal" : "muted"} size="sm" pulse={active} />
+            <span
+              className={cn(
+                "truncate font-mono text-xs font-medium tnum transition-colors duration-200",
+                selected ? "text-ink" : "text-ink-soft"
+              )}
+            >
+              {fmtPhoneGrouped(sim.phone)}
+            </span>
           </span>
-        )}
-        {active && sim.balance !== null && (
-          <span className="ml-1 text-xs font-normal tracking-normal text-ink-mute">Ks</span>
-        )}
-      </div>
-      <div className="mt-1.5 flex items-center justify-between gap-2 font-mono text-[10px] uppercase tnum">
-        <span className={atLimit ? "text-alert-deep" : "text-ink-faint"}>
-          {fmtAmount(sim.volume_today)}/{fmtAmount(DAILY_VOLUME_LIMIT)} today
-        </span>
-        <span className="text-ink-faint">
-          {fmtAmount(sim.volume_this_month)}/{fmtAmount(MONTHLY_VOLUME_LIMIT)} mo
-        </span>
-      </div>
-    </Panel>
+          <span
+            aria-hidden="true"
+            className={cn(
+              "inline-flex shrink-0 items-center gap-1 rounded-sm bg-brass px-1.5 py-0.5 font-mono text-[9.5px] font-semibold uppercase tracking-wider text-substrate transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-opacity",
+              selected ? "opacity-100 scale-100" : "pointer-events-none opacity-0 motion-safe:scale-90"
+            )}
+          >
+            <Check className="h-2.5 w-2.5" strokeWidth={3} />
+            Selected
+          </span>
+        </div>
+
+        <div className="relative z-10 mt-1.5 font-mono text-lg tnum text-brass-deep">
+          {active && sim.balance !== null ? (
+            fmtAmount(sim.balance)
+          ) : (
+            <span className="text-sm text-ink-faint">
+              {active ? "No balance read" : statusBadge(sim.status).label}
+            </span>
+          )}
+          {active && sim.balance !== null && (
+            <span className="ml-1 text-xs font-normal tracking-normal text-ink-mute">Ks</span>
+          )}
+        </div>
+
+        <div className="relative z-10 mt-1.5 flex items-center justify-between gap-2 font-mono text-[10px] uppercase tnum">
+          <span className={atLimit ? "text-alert-deep" : "text-ink-faint"}>
+            {fmtAmount(sim.volume_today)}/{fmtAmount(DAILY_VOLUME_LIMIT)} today
+          </span>
+          <span className="text-ink-faint">
+            {fmtAmount(sim.volume_this_month)}/{fmtAmount(MONTHLY_VOLUME_LIMIT)} mo
+          </span>
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
+export interface SimChipGridProps {
+  sims: Sim[];
+  selectedPhone: string;
+  locked?: boolean;
+  onSelect: (sim: Sim) => void;
+  className?: string;
+}
+
+interface SelectionFrame {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  visible: boolean;
+  animate: boolean;
+}
+
+/**
+ * Grid of SimChip cards with a single shared notched brass outline that glides
+ * smoothly across rows and columns when switching selection, instead of snapping
+ * abruptly between cards.
+ */
+function SimChipGrid({ sims, selectedPhone, locked = false, onSelect, className }: SimChipGridProps) {
+  const gridRef = React.useRef<HTMLDivElement>(null);
+  const prevPhonesRef = React.useRef<string[]>([]);
+  const prevSelectedRef = React.useRef<string>("");
+  const [frame, setFrame] = React.useState<SelectionFrame | null>(null);
+
+  const measure = React.useCallback(
+    (animate: boolean) => {
+      const grid = gridRef.current;
+      if (!grid) return;
+
+      if (!selectedPhone) {
+        setFrame((prev) => (prev ? { ...prev, visible: false, animate: false } : null));
+        return;
+      }
+
+      const nodes = Array.from(grid.querySelectorAll<HTMLElement>("[data-sim-phone]"));
+      const target = nodes.find((el) => el.dataset.simPhone === selectedPhone);
+      if (!target) {
+        setFrame((prev) => (prev ? { ...prev, visible: false, animate: false } : null));
+        return;
+      }
+
+      setFrame({
+        x: target.offsetLeft,
+        y: target.offsetTop,
+        width: target.offsetWidth,
+        height: target.offsetHeight,
+        visible: true,
+        animate,
+      });
+    },
+    [selectedPhone]
+  );
+
+  React.useLayoutEffect(() => {
+    const curPhones = sims.map((s) => s.phone);
+    const prevSelected = prevSelectedRef.current;
+    const prevPhones = prevPhonesRef.current;
+    // Only glide when switching between two cards that are both in the stable visible grid.
+    const canGlide =
+      prevSelected !== "" &&
+      prevSelected !== selectedPhone &&
+      prevPhones.includes(prevSelected) &&
+      curPhones.includes(prevSelected) &&
+      curPhones.includes(selectedPhone);
+
+    measure(canGlide);
+    prevPhonesRef.current = curPhones;
+    prevSelectedRef.current = selectedPhone;
+  }, [sims, selectedPhone, measure]);
+
+  React.useEffect(() => {
+    const grid = gridRef.current;
+    if (!grid || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => measure(false));
+    ro.observe(grid);
+    document.fonts?.ready.then(() => measure(false)).catch(() => {});
+    return () => ro.disconnect();
+  }, [measure]);
+
+  return (
+    <div
+      ref={gridRef}
+      className={cn("sim-chip-surface relative grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3", className)}
+    >
+      {frame && (
+        <div
+          aria-hidden="true"
+          className={cn(
+            "pointer-events-none absolute left-0 top-0 z-20",
+            frame.animate
+              ? "motion-safe:transition-[transform,opacity] motion-safe:duration-300 motion-reduce:transition-opacity"
+              : "transition-opacity duration-200"
+          )}
+          style={{
+            width: frame.width,
+            height: frame.height,
+            opacity: frame.visible ? 1 : 0,
+            transform: `translate3d(${frame.x}px, calc(${frame.y}px + var(--sim-lift)), 0)`,
+            transitionTimingFunction: frame.animate ? "cubic-bezier(0.22, 1, 0.36, 1)" : undefined,
+          }}
+        >
+          <svg
+            width={frame.width}
+            height={frame.height}
+            viewBox={`0 0 ${frame.width} ${frame.height}`}
+            fill="none"
+            className="block overflow-visible"
+          >
+            <polygon
+              points={`1,1 ${Math.max(1, frame.width - 10.4)},1 ${Math.max(1, frame.width - 1)},10.4 ${Math.max(1, frame.width - 1)},${Math.max(1, frame.height - 1)} 1,${Math.max(1, frame.height - 1)}`}
+              stroke="rgb(var(--brass))"
+              strokeWidth={2}
+              strokeLinejoin="miter"
+            />
+          </svg>
+        </div>
+      )}
+      {sims.map((s) => (
+        <SimChip
+          key={s.phone}
+          sim={s}
+          selected={s.phone === selectedPhone}
+          locked={locked}
+          onSelect={onSelect}
+        />
+      ))}
+    </div>
   );
 }
 
@@ -347,4 +535,4 @@ function SimChipSkeleton() {
   );
 }
 
-export { SimCard, SimChip, SimChipSkeleton };
+export { SimCard, SimChip, SimChipGrid, SimChipSkeleton };

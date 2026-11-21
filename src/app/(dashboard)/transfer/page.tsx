@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/Input";
 import { Panel } from "@/components/ui/Panel";
 import { OtpInput } from "@/components/ui/OtpInput";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { SimChip, SimChipSkeleton } from "@/components/SimCard";
+import { SimChipGrid, SimChipSkeleton } from "@/components/SimCard";
 import { Stepper } from "@/components/Stepper";
 import { Receipt, ReceiptRow, ReceiptDivider } from "@/components/Receipt";
 import { SegmentedControl, type SegmentedOption } from "@/components/ui/SegmentedControl";
@@ -550,20 +550,16 @@ export default function TransferPage() {
               )}
             </div>
           ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
-              {displayedSims.map((s) => (
-                <SimChip
-                  key={s.phone}
-                  sim={s}
-                  selected={s.phone === sender}
-                  onSelect={(sim) => {
-                    if (locked) return;
-                    setSelectedCache(sim);
-                    setSender(sim.phone);
-                  }}
-                />
-              ))}
-            </div>
+            <SimChipGrid
+              sims={displayedSims}
+              selectedPhone={sender}
+              locked={locked}
+              onSelect={(sim) => {
+                if (locked) return;
+                setSelectedCache(sim);
+                setSender(sim.phone);
+              }}
+            />
           )}
         </div>
       </section>
