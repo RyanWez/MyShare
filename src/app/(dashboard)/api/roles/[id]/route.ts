@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { dbApi } from "@/lib/db";
 import { requireSession } from "@/lib/authz";
-import { normalizePermissions } from "@/lib/permissions";
+import { normalizePermissions, canGrantPermissions } from "@/lib/permissions";
 
 export const dynamic = "force-dynamic";
 
@@ -23,6 +23,13 @@ export async function PATCH(req: NextRequest, context: { params: { id: string } 
     return NextResponse.json(
       { ok: false, error: "The system Admin role always retains full permissions" },
       { status: 400 }
+    );
+  }
+
+  if (!canGrantPermissions(auth.user.permissions, target.permissions)) {
+    return NextResponse.json(
+      { ok: false, error: "Cannot modify a role with permissions you do not hold" },
+      { status: 403 }
     );
   }
 
@@ -52,6 +59,13 @@ export async function PATCH(req: NextRequest, context: { params: { id: string } 
     ? normalizePermissions(body.permissions, target.permissions)
     : undefined;
 
+  if (nextPermissions && !canGrantPermissions(auth.user.permissions, nextPermissions)) {
+    return NextResponse.json(
+      { ok: false, error: "Cannot set permissions you do not hold" },
+      { status: 403 }
+    );
+  }
+
   const updated = await dbApi.updateRole(roleId, {
     name: nextName,
     permissions: nextPermissions,
@@ -76,6 +90,14 @@ export async function DELETE(req: NextRequest, context: { params: { id: string }
   const roleId = Number(context.params.id);
   if (!Number.isInteger(roleId) || roleId <= 0) {
     return NextResponse.json({ ok: false, error: "Invalid role id" }, { status: 400 });
+  }
+
+  const target = await dbApi.getRoleById(roleId);
+  if (target && !canGrantPermissions(auth.user.permissions, target.permissions)) {
+    return NextResponse.json(
+      { ok: false, error: "Cannot delete a role with permissions you do not hold" },
+      { status: 403 }
+    );
   }
 
   const res = await dbApi.deleteRole(roleId);

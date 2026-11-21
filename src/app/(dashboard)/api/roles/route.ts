@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { dbApi } from "@/lib/db";
 import { requireSession } from "@/lib/authz";
-import { normalizePermissions } from "@/lib/permissions";
+import { normalizePermissions, canGrantPermissions } from "@/lib/permissions";
 
 export const dynamic = "force-dynamic";
 
@@ -38,6 +38,12 @@ export async function POST(req: NextRequest) {
     }
 
     const perms = normalizePermissions(body?.permissions);
+    if (!canGrantPermissions(auth.user.permissions, perms)) {
+      return NextResponse.json(
+        { ok: false, error: "Cannot create a role with permissions you do not hold" },
+        { status: 403 }
+      );
+    }
     const role = await dbApi.createRole(name, perms);
 
     await dbApi.addAuditLog({

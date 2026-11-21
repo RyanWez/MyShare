@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { dbApi } from "@/lib/db";
 import { requireSession } from "@/lib/authz";
 import { hashPassword } from "@/lib/password";
+import { canGrantPermissions } from "@/lib/permissions";
 
 export const dynamic = "force-dynamic";
 
@@ -17,6 +18,13 @@ export async function PATCH(req: NextRequest, context: { params: { id: string } 
   const target = await dbApi.getUserSessionById(userId);
   if (!target) {
     return NextResponse.json({ ok: false, error: "User not found" }, { status: 404 });
+  }
+
+  if (!canGrantPermissions(auth.user.permissions, target.permissions)) {
+    return NextResponse.json(
+      { ok: false, error: "Cannot modify a user with permissions you do not hold" },
+      { status: 403 }
+    );
   }
 
   const body = await req.json();
@@ -67,11 +75,21 @@ export async function PATCH(req: NextRequest, context: { params: { id: string } 
     updates.bumpTokenVersion = true;
   }
 
+  if (userId === auth.user.id && body?.roleId !== undefined && Number(body.roleId) !== target.role_id) {
+    return NextResponse.json({ ok: false, error: "You cannot change your own role" }, { status: 400 });
+  }
+
   let effectiveRole = await dbApi.getRoleById(target.role_id);
   if (body?.roleId !== undefined) {
     const nextRoleId = Number(body.roleId);
     const role = await dbApi.getRoleById(nextRoleId);
     if (!role) return NextResponse.json({ ok: false, error: "Role not found" }, { status: 404 });
+    if (!canGrantPermissions(auth.user.permissions, role.permissions)) {
+      return NextResponse.json(
+        { ok: false, error: "Cannot assign a role with permissions you do not hold" },
+        { status: 403 }
+      );
+    }
     updates.roleId = role.id;
     effectiveRole = role;
   }
@@ -159,6 +177,13 @@ export async function DELETE(req: NextRequest, context: { params: { id: string }
   }
   if (target.is_env_admin) {
     return NextResponse.json({ ok: false, error: "Root Admin cannot be deleted" }, { status: 400 });
+  }
+
+  if (!canGrantPermissions(auth.user.permissions, target.permissions)) {
+    return NextResponse.json(
+      { ok: false, error: "Cannot delete a user with permissions you do not hold" },
+      { status: 403 }
+    );
   }
 
   const deleted = await dbApi.deleteUser(userId);

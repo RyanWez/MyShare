@@ -206,6 +206,27 @@ export function normalizePermissions(
   };
 }
 
+/**
+ * True when `target`'s permissions are a subset of `actor`'s, i.e. the actor
+ * holds every permission the target has (the actor is at least as privileged).
+ */
+export function canGrantPermissions(actor: RolePermissions, target: RolePermissions): boolean {
+  return listMissingPermissions(actor, target).length === 0;
+}
+
+/** Names of permission leaves `target` holds that `actor` does not. */
+export function listMissingPermissions(actor: RolePermissions, target: RolePermissions): string[] {
+  const missing: string[] = [];
+  for (const [section, leaves] of Object.entries(target)) {
+    for (const [key, value] of Object.entries(leaves)) {
+      if (value === true && !(actor as any)[section]?.[key]) {
+        missing.push(`${section}.${key}`);
+      }
+    }
+  }
+  return missing;
+}
+
 /** Whether an operator is exempt from SIM refresh cooldown & burst rate limits. */
 export function hasUnlimitedRefresh(
   roleName: string | undefined,

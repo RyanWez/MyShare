@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { dbApi } from "@/lib/db";
+import { dbApi, TransferReservationError } from "@/lib/db";
 import { apiOk, registerMyShare, normalizeMsisdn } from "@/lib/mytel";
 import { getValidToken } from "@/lib/tokens";
 import { canAccessSim, requireSession } from "@/lib/authz";
@@ -20,7 +20,7 @@ export async function POST(req: NextRequest) {
       );
 
     const amt = Number(amount);
-    if (!Number.isFinite(amt) || amt < 500 || amt > 5000)
+    if (!Number.isInteger(amt) || amt < 500 || amt > 5000)
       return NextResponse.json({ ok: false, error: "Amount must be 500–5000 Ks" }, { status: 400 });
 
     const sender = normalizeMsisdn(phone);
@@ -41,22 +41,35 @@ export async function POST(req: NextRequest) {
     }
 
     const fee = Math.round(amt * 0.05);
-    const transfer = await dbApi.addTransfer({
-      sender_phone: sender,
-      receiver_phone: receiver,
-      rex_id: sim.rex_id ?? auth.user.rex_id,
-      created_by_user_id: auth.user.id,
-      amount: amt,
-      fee,
-      status: "pending",
-    });
 
+    // Reserve: enforce caps + balance and insert the pending row atomically.
+    let transfer;
+    try {
+      transfer = await dbApi.reserveTransferSlot({
+        sender_phone: sender,
+        receiver_phone: receiver,
+        rex_id: sim.rex_id ?? auth.user.rex_id,
+        created_by_user_id: auth.user.id,
+        amount: amt,
+        fee,
+      });
+    } catch (err: any) {
+      if (err instanceof TransferReservationError) {
+        return NextResponse.json(
+          { ok: false, error: err.message, code: err.code },
+          { status: err.httpStatus }
+        );
+      }
+      throw err;
+    }
+
+    // External call runs OUTSIDE any open transaction.
     let result;
     try {
       result = await registerMyShare(ts.token, sender, receiverMsisdn, amt, otp);
     } catch (err: any) {
       const message = err?.message || "Failed to reach Mytel server";
-      await dbApi.updateTransfer(transfer.id, {
+      await dbApi.finalizeTransfer(transfer.id, {
         status: "failed",
         error_code: null,
         message,
@@ -69,15 +82,12 @@ export async function POST(req: NextRequest) {
 
     const ok = apiOk(result.errorCode);
 
-    await dbApi.updateTransfer(transfer.id, {
+    // Finalize: mark the transfer and (on success) debit the SIM in one transaction.
+    await dbApi.finalizeTransfer(transfer.id, {
       status: ok ? "success" : "failed",
       error_code: result.errorCode,
       message: result.message ?? null,
     });
-
-    if (ok) {
-      await dbApi.debitSimBalance(sender, amt + fee);
-    }
 
     return NextResponse.json({
       ok,

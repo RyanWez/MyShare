@@ -3,6 +3,13 @@ import { loginWithOtp, confirmRegister, normalizeMsisdn, apiOk } from "@/lib/myt
 import { persistLogin } from "@/lib/session";
 import { canAccessSim, requireSession, resolveScopedRexId } from "@/lib/authz";
 import { dbApi } from "@/lib/db";
+import { rateLimit, rateLimitReset } from "@/lib/rateLimit";
+
+const OTP_VERIFY_WINDOW_MS = 15 * 60 * 1000;
+const PHONE_BUCKET = "otp:verify:phone";
+const USER_BUCKET = "otp:verify:user";
+const PHONE_LIMIT = 8;
+const USER_LIMIT = 20;
 
 export async function POST(req: NextRequest) {
   const auth = await requireSession(req, (p) => p.sims.addLogin);
@@ -14,6 +21,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: "phone & otp required" }, { status: 400 });
 
     const msisdn = normalizeMsisdn(phone);
+    if (!/^959\d{9}$/.test(msisdn)) {
+      return NextResponse.json({ ok: false, error: "invalid phone number" }, { status: 400 });
+    }
     const existing = await dbApi.getSim(msisdn);
     if (existing && !canAccessSim(auth.user, existing)) {
       return NextResponse.json(
@@ -34,11 +44,30 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    const phonePeek = rateLimit(PHONE_BUCKET, msisdn, PHONE_LIMIT, OTP_VERIFY_WINDOW_MS, {
+      peek: true,
+    });
+    const userPeek = rateLimit(USER_BUCKET, String(auth.user.id), USER_LIMIT, OTP_VERIFY_WINDOW_MS, {
+      peek: true,
+    });
+    if (!phonePeek.allowed || !userPeek.allowed) {
+      const retryAfterSec = Math.max(
+        phonePeek.allowed ? 0 : phonePeek.retryAfterSec,
+        userPeek.allowed ? 0 : userPeek.retryAfterSec
+      );
+      return NextResponse.json(
+        { ok: false, error: "Too many failed attempts. Try again later." },
+        { status: 429, headers: { "Retry-After": String(retryAfterSec) } }
+      );
+    }
+
     const result = registering
       ? await confirmRegister(msisdn, reqId, otp)
       : await loginWithOtp(msisdn, otp);
 
     if (!apiOk(result.errorCode) || !result.result?.access_token) {
+      rateLimit(PHONE_BUCKET, msisdn, PHONE_LIMIT, OTP_VERIFY_WINDOW_MS);
+      rateLimit(USER_BUCKET, String(auth.user.id), USER_LIMIT, OTP_VERIFY_WINDOW_MS);
       const isUnauth =
         result.errorCode === 401 ||
         String(result.message ?? "")
@@ -55,6 +84,8 @@ export async function POST(req: NextRequest) {
         message: friendly,
       });
     }
+
+    rateLimitReset(PHONE_BUCKET, msisdn);
 
     const { subscriptionId, balance } = await persistLogin(
       msisdn,

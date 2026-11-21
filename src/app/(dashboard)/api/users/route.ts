@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { dbApi } from "@/lib/db";
 import { requireSession } from "@/lib/authz";
 import { hashPassword } from "@/lib/password";
+import { canGrantPermissions } from "@/lib/permissions";
 
 export const dynamic = "force-dynamic";
 
@@ -55,6 +56,21 @@ export async function POST(req: NextRequest) {
     const role = await dbApi.getRoleById(roleId);
     if (!role) {
       return NextResponse.json({ ok: false, error: "Role not found" }, { status: 404 });
+    }
+
+    const isAdminActor =
+      auth.user.is_env_admin || auth.user.role_name?.toLowerCase() === "admin";
+    if (role.is_system && role.name.toLowerCase() === "admin" && !isAdminActor) {
+      return NextResponse.json(
+        { ok: false, error: "Only an Admin can assign the system Admin role" },
+        { status: 403 }
+      );
+    }
+    if (!canGrantPermissions(auth.user.permissions, role.permissions)) {
+      return NextResponse.json(
+        { ok: false, error: "Cannot assign a role with permissions you do not hold" },
+        { status: 403 }
+      );
     }
 
     const existingUser = await dbApi.getUserAuthByUsername(username);

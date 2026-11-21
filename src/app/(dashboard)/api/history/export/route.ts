@@ -10,7 +10,10 @@ const EXPORT_BATCH_SIZE = 2_000;
 
 const csvCell = (v: string | number | null | undefined) => {
   const s = v === null || v === undefined ? "" : String(v);
-  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  // Neutralise spreadsheet formula injection (=, +, -, @, tab/CR leads) so Excel
+  // and Sheets treat the cell as text.
+  const safe = /^[=+\-@\t\r]/.test(s) || /^[\t\r ]*[=+\-@]/.test(s) ? `'${s}` : s;
+  return /[",\n\r]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
 };
 
 const CSV_HEADER = [

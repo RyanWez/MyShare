@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { authenticator } from "otplib";
+import { randomBytes, scryptSync } from "node:crypto";
 import {
   SESSION_COOKIE,
   authRequired,
@@ -14,6 +15,18 @@ import { clientIp, limitFromEnv, rateLimit, rateLimitReset } from "@/lib/rateLim
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const IP_BUCKET = "login:ip";
 const GLOBAL_BUCKET = "login:global";
+
+/**
+ * Valid-format hash so unknown usernames still run the same ~100ms scrypt
+ * work as known ones — otherwise response timing reveals whether the
+ * username exists. Computed once at module load.
+ */
+const DUMMY_SALT = randomBytes(16).toString("hex");
+const DUMMY_PASSWORD_HASH = `scrypt.v1.${DUMMY_SALT}.${scryptSync(
+  "timing-equalizer",
+  DUMMY_SALT,
+  64
+).toString("hex")}`;
 
 const tooMany = (retryAfterSec: number) =>
   NextResponse.json(
@@ -85,7 +98,11 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  if (!user || !verifyPasswordHash(password, user.password_hash)) {
+  const passwordValid = verifyPasswordHash(
+    password,
+    user?.password_hash ?? DUMMY_PASSWORD_HASH
+  );
+  if (!user || !passwordValid) {
     spendAttempt();
     return NextResponse.json({ ok: false, error: "Invalid username or password" }, { status: 401 });
   }

@@ -89,20 +89,39 @@ export function rateLimitReset(name: string, key: string) {
 }
 
 /**
- * Best-effort caller identity. Fly terminates TLS and forwards the real address,
- * so trust its header first; `x-forwarded-for` may carry a proxy chain, and its
- * first entry is the client. Falls back to a single shared bucket rather than
- * letting an unidentifiable caller through unmetered.
+ * Best-effort caller identity, trusting proxy headers only when the runtime
+ * says a trusted proxy sits in front of us. On Fly, the platform sets
+ * FLY_APP_NAME and provides the real peer address in `fly-client-ip`. On
+ * Render (RENDER) or when TRUST_PROXY is explicitly enabled, prefer Cloudflare's
+ * `cf-connecting-ip`, else the rightmost (last) `x-forwarded-for` entry — the
+ * one the trusted proxy itself appended; leftmost entries are client-supplied
+ * and trivially spoofed. With no trusted proxy, headers are ignored and all
+ * callers share one bucket so attackers cannot rotate headers to evade
+ * per-IP limits.
  */
 export function clientIp(req: Request): string {
-  const flyIp = req.headers.get("fly-client-ip");
-  if (flyIp) return flyIp.trim();
-  const forwarded = req.headers.get("x-forwarded-for");
-  if (forwarded) {
-    const first = forwarded.split(",")[0]?.trim();
-    if (first) return first;
+  if (process.env.FLY_APP_NAME) {
+    return req.headers.get("fly-client-ip")?.trim() || "unknown";
   }
-  return req.headers.get("x-real-ip")?.trim() || "unknown";
+  if (
+    process.env.RENDER ||
+    process.env.TRUST_PROXY === "true" ||
+    process.env.TRUST_PROXY === "1"
+  ) {
+    const cfIp = req.headers.get("cf-connecting-ip")?.trim();
+    if (cfIp) return cfIp;
+    const forwarded = req.headers.get("x-forwarded-for");
+    if (forwarded) {
+      const entries = forwarded
+        .split(",")
+        .map((entry) => entry.trim())
+        .filter(Boolean);
+      const last = entries[entries.length - 1];
+      if (last) return last;
+    }
+    return req.headers.get("x-real-ip")?.trim() || "unknown";
+  }
+  return "untrusted-proxy";
 }
 
 /** Positive integer from the environment, or the built-in default. */

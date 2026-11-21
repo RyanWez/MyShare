@@ -15,6 +15,8 @@ const globalForPg = globalThis as unknown as {
   __myshareDbInit?: Promise<void>;
 };
 
+let sslVerificationWarned = false;
+
 function createPool(): Pool {
   const rawUrl = process.env.DATABASE_URL;
   if (!rawUrl) {
@@ -28,6 +30,17 @@ function createPool(): Pool {
 
   const ca = process.env.PG_SSL_CA?.replace(/\\n/g, "\n");
   const useSsl = sslMode !== "disable";
+  // Certificates are verified by default; disabling verification must be explicit.
+  const verificationDisabled =
+    sslMode === "no-verify" ||
+    (process.env.PG_SSL_REJECT_UNAUTHORIZED ?? "").trim().toLowerCase() === "false";
+  if (useSsl && verificationDisabled && !sslVerificationWarned) {
+    sslVerificationWarned = true;
+    console.warn(
+      "[pg] TLS certificate verification is DISABLED (sslmode=no-verify or PG_SSL_REJECT_UNAUTHORIZED=false). " +
+        "This is insecure and should only be used for local development."
+    );
+  }
   // Managed transaction poolers (e.g. Neon -pooler, Supabase Supavisor :6543) drop idle
   // server sockets quickly, while direct Postgres servers keep per-connection OS processes.
   const isExternalPooler =
@@ -38,11 +51,7 @@ function createPool(): Pool {
 
   const pool = new Pool({
     connectionString: parsed.toString(),
-    ssl: useSsl
-      ? ca
-        ? { ca, rejectUnauthorized: true }
-        : { rejectUnauthorized: false }
-      : false,
+    ssl: useSsl ? { ...(ca ? { ca } : {}), rejectUnauthorized: !verificationDisabled } : false,
     max: maxConnections,
     idleTimeoutMillis: idleTimeoutMs,
     connectionTimeoutMillis: 10_000,

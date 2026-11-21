@@ -190,10 +190,22 @@ function invalidateRexCache() {
 
 const now = () => Math.floor(Date.now() / 1000);
 
+/** Typed error for transfer reservation failures; `code`/`httpStatus` drive the API response. */
+export class TransferReservationError extends Error {
+  constructor(
+    message: string,
+    readonly code: "sim_not_found" | "daily_volume_limit" | "monthly_volume_limit" | "insufficient_balance",
+    readonly httpStatus: number
+  ) {
+    super(message);
+    this.name = "TransferReservationError";
+  }
+}
+
 function decodeSim<T extends SimRow | undefined>(row: T): T {
   if (!row) return row;
-  row.access_token = decryptSecret(row.access_token);
-  row.refresh_token = decryptSecret(row.refresh_token);
+  row.access_token = decryptSecret(row.access_token, row.phone);
+  row.refresh_token = decryptSecret(row.refresh_token, row.phone);
   return row;
 }
 
@@ -1143,7 +1155,7 @@ export const dbApi = {
       for (const [k, v] of Object.entries(fields)) {
         if (skipKeys.has(k) || v === undefined) continue;
         const val = ENCRYPTED_SIM_COLUMNS.includes(k as (typeof ENCRYPTED_SIM_COLUMNS)[number])
-          ? encryptSecret(v as string | null)
+          ? encryptSecret(v as string | null, phone)
           : v;
         sets.push(`${k} = ${push(val)}`);
       }
@@ -1212,7 +1224,7 @@ export const dbApi = {
 
   async debitSimBalance(phone: string, amount: number): Promise<void> {
     const res = await query<{ rex_id: number | null }>(
-      `UPDATE sims SET balance = balance - $1, updated_at = $2
+      `UPDATE sims SET balance = GREATEST(0, balance - $1), updated_at = $2
        WHERE phone = $3 AND balance IS NOT NULL
        RETURNING rex_id`,
       [amount, now(), phone]
@@ -1264,9 +1276,9 @@ export const dbApi = {
       vals.push(v);
       return `$${vals.length}`;
     };
-    const skip = new Set(["id", "rex_name", "created_by_username"]);
+    const allowed = new Set(["status", "error_code", "message", "amount", "fee"]);
     for (const [k, v] of Object.entries(fields)) {
-      if (skip.has(k) || v === undefined) continue;
+      if (!allowed.has(k) || v === undefined) continue;
       sets.push(`${k} = ${push(v)}`);
     }
     if (sets.length === 0) return;
@@ -1289,6 +1301,161 @@ export const dbApi = {
     } else {
       sse.emit("update", { kind: "sync", scope: "transfers", rexId: row?.rex_id ?? null });
     }
+  },
+
+  /**
+   * Atomically enforce daily/monthly volume caps and SIM balance, then insert the
+   * 'pending' transfer row — all in one transaction with the sender SIM row locked.
+   * Throws TransferReservationError on cap/balance violations.
+   */
+  async reserveTransferSlot(t: {
+    sender_phone: string;
+    receiver_phone: string;
+    rex_id?: number | null;
+    created_by_user_id?: number | null;
+    amount: number;
+    fee: number;
+  }): Promise<TransferRow> {
+    const transferId = await withTransaction(async (client) => {
+      const simRes = await client.query<{ id: number; balance: number | null }>(
+        `SELECT id, balance, status FROM sims WHERE phone = $1 FOR UPDATE`,
+        [t.sender_phone]
+      );
+      if (simRes.rows.length === 0) {
+        throw new TransferReservationError("SIM not found", "sim_not_found", 404);
+      }
+
+      const todayStart = startOfToday();
+      const monthStart = startOfThisMonth();
+      // Only count pending rows from the last 5 minutes so stale crashed pending
+      // rows do not permanently lock the SIM, while in-flight transfers still count.
+      const recentPendingCutoff = now() - 300;
+
+      const volRes = await client.query<{
+        vol_today: number;
+        vol_month: number;
+        pending_cost: number;
+      }>(
+        `SELECT
+           COALESCE(SUM(t.amount) FILTER (WHERE t.created_at >= $2), 0)::bigint AS vol_today,
+           COALESCE(SUM(t.amount), 0)::bigint AS vol_month,
+           COALESCE(SUM(t.amount + t.fee) FILTER (WHERE t.status = 'pending'), 0)::bigint AS pending_cost
+         FROM transfers t
+         WHERE t.sender_phone = $1
+           AND t.created_at >= $3
+           AND (t.status = 'success' OR (t.status = 'pending' AND t.created_at >= $4))`,
+        [t.sender_phone, todayStart, monthStart, recentPendingCutoff]
+      );
+      const vols = volRes.rows[0];
+      const volToday = Number(vols?.vol_today ?? 0);
+      const volMonth = Number(vols?.vol_month ?? 0);
+      const pendingCost = Number(vols?.pending_cost ?? 0);
+
+      if (volToday + t.amount > DAILY_VOLUME_LIMIT) {
+        throw new TransferReservationError(
+          "Daily transfer volume limit reached",
+          "daily_volume_limit",
+          400
+        );
+      }
+      if (volMonth + t.amount > MONTHLY_VOLUME_LIMIT) {
+        throw new TransferReservationError(
+          "Monthly transfer volume limit reached",
+          "monthly_volume_limit",
+          400
+        );
+      }
+
+      const sim = simRes.rows[0];
+      if (sim.balance !== null && sim.balance - pendingCost < t.amount + t.fee) {
+        throw new TransferReservationError("Insufficient SIM balance", "insufficient_balance", 400);
+      }
+
+      const insRes = await client.query<{ id: number }>(
+        `INSERT INTO transfers (sender_phone, receiver_phone, rex_id, created_by_user_id, amount, fee, status, error_code, message, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, 'pending', NULL, NULL, $7)
+         RETURNING id`,
+        [
+          t.sender_phone,
+          t.receiver_phone,
+          t.rex_id ?? null,
+          t.created_by_user_id ?? null,
+          t.amount,
+          t.fee,
+          now(),
+        ]
+      );
+      return insRes.rows[0].id;
+    });
+
+    sse.emit("update", { kind: "sync", scope: "transfers", rexId: t.rex_id ?? null });
+    return (await this.getTransferById(transferId))!;
+  },
+
+  /**
+   * Finalize a pending transfer after the external call. Marks it success/failed and,
+   * on success, debits the sender SIM balance in the SAME transaction (clamped at 0 so
+   * a balance refresh race can never roll back the recorded successful transfer).
+   * SSE events fire after commit.
+   */
+  async finalizeTransfer(
+    id: number,
+    result: { status: "success" | "failed"; error_code?: number | null; message?: string | null }
+  ): Promise<TransferRow | undefined> {
+    const info = await withTransaction(async (client) => {
+      const updRes = await client.query<{
+        sender_phone: string;
+        receiver_phone: string;
+        rex_id: number | null;
+        amount: number;
+        fee: number;
+      }>(
+        `UPDATE transfers
+         SET status = $2, error_code = $3, message = $4
+         WHERE id = $1 AND status = 'pending'
+         RETURNING sender_phone, receiver_phone, rex_id, amount, fee`,
+        [id, result.status, result.error_code ?? null, result.message ?? null]
+      );
+      if (updRes.rows.length === 0) return null;
+
+      const row = updRes.rows[0];
+      let debitedRexId: number | null | undefined;
+      if (result.status === "success") {
+        const debitRes = await client.query<{ rex_id: number | null }>(
+          `UPDATE sims SET balance = GREATEST(0, balance - $2), updated_at = $3
+           WHERE phone = $1 AND balance IS NOT NULL
+           RETURNING rex_id`,
+          [row.sender_phone, row.amount + row.fee, now()]
+        );
+        debitedRexId = debitRes.rows[0]?.rex_id ?? null;
+      }
+      return {
+        sender_phone: row.sender_phone,
+        receiver_phone: row.receiver_phone,
+        rexId: row.rex_id,
+        amount: row.amount,
+        debitedRexId,
+      };
+    });
+
+    if (!info) return this.getTransferById(id);
+
+    sse.emit("update", {
+      kind: "transfer:result",
+      scope: "transfers",
+      rexId: info.rexId ?? null,
+      id,
+      status: result.status,
+      sender: info.sender_phone,
+      receiver: info.receiver_phone,
+      amount: info.amount,
+      message: result.message ?? null,
+    });
+    if (info.debitedRexId !== undefined) {
+      sse.emit("update", { kind: "sync", scope: "sim_balance", rexId: info.debitedRexId });
+    }
+    sse.emit("update", { kind: "sync", scope: "transfers", rexId: info.rexId ?? null });
+    return this.getTransferById(id);
   },
 
   async listTransfers(limit = 1000, fromTs?: number, toTs?: number, rexId?: number | null): Promise<TransferRow[]> {

@@ -21,8 +21,10 @@
 
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
 
-/** Version marker so the format can change without guessing at old values. */
-const PREFIX = "enc.v1.";
+/** Version markers so the format can change without guessing at old values.
+ *  v1 is legacy (no AAD); v2 binds the ciphertext to context via AES-GCM AAD. */
+const PREFIX_V1 = "enc.v1.";
+const PREFIX_V2 = "enc.v2.";
 const IV_BYTES = 12;
 
 let cachedKey: Buffer | null | undefined;
@@ -34,23 +36,21 @@ function derivedKey(): Buffer | null {
 
   const material = process.env.TOKEN_ENC_KEY || process.env.AUTH_SECRET || "";
   if (!material) {
-    if (process.env.NODE_ENV === "production") {
-      // Production already refuses to mint sessions without AUTH_SECRET, so nothing
-      // can log in to write a token here — but say so rather than quietly storing
-      // secrets in the clear.
-      if (!warnedNoKey) {
-        console.error(
-          "[crypto] No TOKEN_ENC_KEY or AUTH_SECRET — SIM tokens cannot be encrypted at rest."
-        );
-        warnedNoKey = true;
-      }
-      cachedKey = null;
-      return null;
+    if (!warnedNoKey) {
+      console.warn(
+        "[crypto] No TOKEN_ENC_KEY or AUTH_SECRET — SIM tokens cannot be encrypted at rest."
+      );
+      warnedNoKey = true;
     }
-    // Dev convenience, matching lib/auth's fallback: a fixed local key keeps the
-    // encrypted path exercised without demanding secrets for `next dev`.
-    cachedKey = scryptSync("dev-insecure-secret", "myshare.token.v1", 32);
-    return cachedKey;
+    // Strict fallback: the fixed local key is only allowed under `next dev`,
+    // keeping the encrypted path exercised without demanding secrets. Any other
+    // environment fails closed — callers must refuse to encrypt.
+    if (process.env.NODE_ENV === "development") {
+      cachedKey = scryptSync("dev-insecure-secret", "myshare.token.v1", 32);
+      return cachedKey;
+    }
+    cachedKey = null;
+    return null;
   }
 
   cachedKey = scryptSync(material, "myshare.token.v1", 32);
@@ -59,27 +59,36 @@ function derivedKey(): Buffer | null {
 
 /** True for a value this module produced, as opposed to a legacy plaintext one. */
 export function isEncrypted(value: string): boolean {
-  return value.startsWith(PREFIX);
+  return value.startsWith(PREFIX_V1) || value.startsWith(PREFIX_V2);
 }
 
 /**
- * Wrap a secret for storage. Returns the input unchanged when no key is available,
- * so a misconfigured deployment degrades to its previous behaviour instead of
- * losing the ability to store tokens at all.
+ * Wrap a secret for storage. Throws when no key is available, so a misconfigured
+ * deployment fails closed instead of silently storing secrets in the clear.
+ *
+ * When `aad` is given the ciphertext is bound to that context (AES-GCM AAD) and
+ * prefixed `enc.v2.`; without it the legacy `enc.v1.` format is produced. A value
+ * that is already encrypted is returned as-is, never double-encrypted.
  */
-export function encryptSecret(value: string | null | undefined): string | null {
+export function encryptSecret(
+  value: string | null | undefined,
+  aad?: string
+): string | null {
   if (value === null || value === undefined || value === "") return null;
   if (isEncrypted(value)) return value;
 
   const key = derivedKey();
-  if (!key) return value;
+  if (!key) {
+    throw new Error("TOKEN_ENC_KEY or AUTH_SECRET must be set to encrypt secrets");
+  }
 
   const iv = randomBytes(IV_BYTES);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
+  if (aad !== undefined) cipher.setAAD(Buffer.from(aad, "utf8"));
   const ciphertext = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
   const tag = cipher.getAuthTag();
   return (
-    PREFIX +
+    (aad !== undefined ? PREFIX_V2 : PREFIX_V1) +
     [iv.toString("base64"), tag.toString("base64"), ciphertext.toString("base64")].join(".")
   );
 }
@@ -89,20 +98,28 @@ export function encryptSecret(value: string | null | undefined): string | null {
  * back as-is, which is what lets the migration be lazy. A value that will not open
  * — wrong key, truncated column, tampering — comes back as null: the caller then
  * sees a SIM with no token and asks for a fresh login, which is the honest outcome.
+ *
+ * `aad` must be the same context the value was encrypted with (`enc.v2.` values);
+ * a mismatch fails authentication and returns null.
  */
-export function decryptSecret(value: string | null | undefined): string | null {
+export function decryptSecret(
+  value: string | null | undefined,
+  aad?: string
+): string | null {
   if (value === null || value === undefined || value === "") return null;
   if (!isEncrypted(value)) return value;
 
   const key = derivedKey();
   if (!key) return null;
 
-  const [ivB64, tagB64, dataB64] = value.slice(PREFIX.length).split(".");
+  const isV2 = value.startsWith(PREFIX_V2);
+  const [ivB64, tagB64, dataB64] = value.slice(PREFIX_V1.length).split(".");
   if (!ivB64 || !tagB64 || !dataB64) return null;
 
   try {
     const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(ivB64, "base64"));
     decipher.setAuthTag(Buffer.from(tagB64, "base64"));
+    if (isV2 && aad !== undefined) decipher.setAAD(Buffer.from(aad, "utf8"));
     return Buffer.concat([
       decipher.update(Buffer.from(dataB64, "base64")),
       decipher.final(),
