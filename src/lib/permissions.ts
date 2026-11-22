@@ -8,6 +8,7 @@ export interface OverviewPermissions {
   totalBalance: boolean;
   successMetric: boolean;
   volumeMetric: boolean;
+  debitedMetric: boolean;
   netVolumeMetric: boolean;
   transfersChart: boolean;
   volumeChart: boolean;
@@ -54,6 +55,7 @@ export const DEFAULT_ADMIN_PERMISSIONS: RolePermissions = {
     totalBalance: true,
     successMetric: true,
     volumeMetric: true,
+    debitedMetric: true,
     netVolumeMetric: true,
     transfersChart: true,
     volumeChart: true,
@@ -97,6 +99,7 @@ export const DEFAULT_STAFF_PERMISSIONS: RolePermissions = {
     totalBalance: true,
     successMetric: true,
     volumeMetric: true,
+    debitedMetric: true,
     netVolumeMetric: false,
     transfersChart: true,
     volumeChart: true,
@@ -168,6 +171,12 @@ export function normalizePermissions(
       totalBalance: overviewView && bool(ov.totalBalance, fallback.overview.totalBalance),
       successMetric: overviewView && bool(ov.successMetric, fallback.overview.successMetric),
       volumeMetric: overviewView && bool(ov.volumeMetric, fallback.overview.volumeMetric),
+      debitedMetric:
+        overviewView &&
+        bool(
+          ov.debitedMetric,
+          typeof ov.volumeMetric === "boolean" ? ov.volumeMetric : fallback.overview.debitedMetric
+        ),
       netVolumeMetric: overviewView && bool(ov.netVolumeMetric, fallback.overview.netVolumeMetric),
       transfersChart: overviewView && bool(ov.transfersChart, fallback.overview.transfersChart),
       volumeChart: overviewView && bool(ov.volumeChart, fallback.overview.volumeChart),

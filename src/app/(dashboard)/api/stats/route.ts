@@ -36,8 +36,9 @@ function totals(buckets: SeriesBucket[]) {
       sent: acc.sent + b.sent,
       failed: acc.failed + b.failed,
       volume: acc.volume + b.volume,
+      fee: acc.fee + b.fee,
     }),
-    { sent: 0, failed: 0, volume: 0 }
+    { sent: 0, failed: 0, volume: 0, fee: 0 }
   );
 }
 
@@ -55,6 +56,7 @@ export async function GET(req: NextRequest) {
     ov.successMetric ||
     ov.topErrorsChart ||
     ov.volumeMetric ||
+    ov.debitedMetric ||
     ov.netVolumeMetric;
 
   const [buckets, tray, topErrors] = await Promise.all([
@@ -73,6 +75,7 @@ export async function GET(req: NextRequest) {
           sent: ov.transfersChart ? b.sent : 0,
           failed: ov.transfersChart ? b.failed : 0,
           volume: ov.volumeChart ? b.volume : 0,
+          fee: ov.volumeChart && ov.debitedMetric ? b.fee : 0,
         }))
       : [];
 
@@ -88,7 +91,8 @@ export async function GET(req: NextRequest) {
     totals: {
       sent: ov.successMetric ? sum.sent : 0,
       failed: ov.successMetric || ov.topErrorsChart ? sum.failed : 0,
-      volume: ov.volumeMetric || ov.netVolumeMetric ? sum.volume : 0,
+      volume: ov.volumeMetric || ov.debitedMetric || ov.netVolumeMetric ? sum.volume : 0,
+      fee: ov.debitedMetric ? sum.fee : 0,
     },
     topErrors,
   });

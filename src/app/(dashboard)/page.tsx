@@ -54,8 +54,8 @@ function DashboardSkeleton() {
         <div className="h-10 w-full max-w-md rounded border border-hairline bg-card" />
 
         {/* Metric strip */}
-        <div className="grid gap-px overflow-hidden rounded border border-hairline bg-hairline sm:grid-cols-3">
-          {[1, 2, 3].map((i) => (
+        <div className="grid gap-px overflow-hidden rounded border border-hairline bg-hairline grid-cols-2 md:grid-cols-4">
+          {[1, 2, 3, 4].map((i) => (
             <div key={i} className="space-y-2 bg-card px-4 py-3.5">
               <div className="h-2.5 w-20 rounded bg-substrate" />
               <div className="h-5 w-28 rounded bg-substrate" />
@@ -300,8 +300,19 @@ export default function DashboardPage() {
       label: `Volume ${period}`,
       value: totals?.volume ?? 0,
       format: fmtAmount,
-      sub: "Ks, fees excluded",
+      sub: "Ks received by recipients",
       tone: totals?.volume ? "brass" : "muted",
+    });
+  }
+  if (ov.debitedMetric) {
+    const feeTotal = totals?.fee ?? 0;
+    const totalDebited = (totals?.volume ?? 0) + feeTotal;
+    metricItems.push({
+      label: `Total debited ${period}`,
+      value: totalDebited,
+      format: fmtAmount,
+      sub: `Ks, incl. ${fmtAmount(feeTotal)} (5%) fees`,
+      tone: totalDebited ? "brass" : "muted",
     });
   }
   if (ov.netVolumeMetric) {

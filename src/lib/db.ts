@@ -112,6 +112,7 @@ export interface SeriesBucket {
   sent: number;
   failed: number;
   volume: number;
+  fee: number;
 }
 
 export interface ReceiverGroup {
@@ -1603,11 +1604,12 @@ export const dbApi = {
     const rexClause = rexId !== undefined && rexId !== null ? `AND rex_id = $3` : "";
     if (rexId !== undefined && rexId !== null) args.push(rexId);
 
-    const res = await query<{ bucket: string; sent: number; failed: number; volume: number }>(
+    const res = await query<{ bucket: string; sent: number; failed: number; volume: number; fee: number }>(
       `SELECT to_char(to_timestamp(created_at) AT TIME ZONE 'Asia/Yangon', '${fmt}') AS bucket,
               SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END)::int AS sent,
               SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END)::int AS failed,
-              COALESCE(SUM(CASE WHEN status = 'success' THEN amount ELSE 0 END), 0)::bigint AS volume
+              COALESCE(SUM(CASE WHEN status = 'success' THEN amount ELSE 0 END), 0)::bigint AS volume,
+              COALESCE(SUM(CASE WHEN status = 'success' THEN fee ELSE 0 END), 0)::bigint AS fee
        FROM transfers
        WHERE created_at >= $1 AND created_at < $2 ${rexClause}
        GROUP BY bucket`,
@@ -1628,6 +1630,7 @@ export const dbApi = {
         sent: Number(hit?.sent ?? 0),
         failed: Number(hit?.failed ?? 0),
         volume: Number(hit?.volume ?? 0),
+        fee: Number(hit?.fee ?? 0),
       });
       ts += stepSec;
     }

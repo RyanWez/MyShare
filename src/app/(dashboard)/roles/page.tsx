@@ -346,6 +346,7 @@ export default function RolesPage() {
                           totalBalance: false,
                           successMetric: false,
                           volumeMetric: false,
+                          debitedMetric: false,
                           netVolumeMetric: false,
                           transfersChart: false,
                           volumeChart: false,
@@ -375,6 +376,12 @@ export default function RolesPage() {
                   checked={draftPerms.overview.volumeMetric}
                   disabled={isLockedAdmin}
                   onChange={(v) => setDraftPerms((p) => ({ ...p, overview: { ...p.overview, volumeMetric: v } }))}
+                />
+                <PermSwitch
+                  label="Total Debited (incl. 5% Fee)"
+                  checked={draftPerms.overview.debitedMetric}
+                  disabled={isLockedAdmin}
+                  onChange={(v) => setDraftPerms((p) => ({ ...p, overview: { ...p.overview, debitedMetric: v } }))}
                 />
                 <PermSwitch
                   label="Volume (-20%) Metric"

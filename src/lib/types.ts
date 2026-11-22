@@ -133,6 +133,7 @@ export interface SeriesBucket {
   sent: number;
   failed: number;
   volume: number;
+  fee: number;
 }
 
 export interface StatsResponse {
@@ -144,6 +145,6 @@ export interface StatsResponse {
     granularity: "hour" | "day";
     buckets: SeriesBucket[];
   };
-  totals: { sent: number; failed: number; volume: number };
+  totals: { sent: number; failed: number; volume: number; fee: number };
   topErrors: { reason: string; count: number }[];
 }
